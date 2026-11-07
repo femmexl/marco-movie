@@ -1,54 +1,39 @@
-# Marco Movie · 跨平台客户端（Windows / macOS / iPhone / iPad）
+# Marco Movie · Flutter 客户端
 
-本目录为 Marco Movie 的 Flutter 跨平台工程，覆盖 **Windows 桌面端**、**Apple macOS（Mac 电脑）**、**iOS（iPhone）** 与 **iPadOS（iPad）**，并与安卓端（手机 + 平板 + 电视三合一 APK）完全互通配置、收藏与观看历史备份。
+本目录覆盖 Windows、macOS、iPhone、iPad。原生 Android 手机/平板版、电视版和 Lite 使用各自安装包。各端使用共用配置格式的部分字段，但插件运行环境和备份字段支持并不完全相同，详见[兼容与验证边界](../docs/COMPATIBILITY.md)。
 
-> **免责声明**：本产品仅为本地与网络流媒体播放工具，**不内置、不提供、不托管**任何影视资源、直播源或配置地址。用户需自行合法获取配置与内容访问权限。
+应用不内置影视资源或订阅，配置由用户自行提供。
 
-## 平台适配特性
+## 界面与操作
 
-| 平台 | 界面形态 | 交互适配 |
-|---|---|---|
-| **Windows / macOS** | 桌面大屏毛玻璃侧边导航栏（`NavigationRail`）+ 4~7 列自适应海报墙 + 左右分栏详情页 | 键盘快捷键（空格播放/暂停、`←`/`→` 快进快退 15 秒、`↑`/`↓` 调节音量、`Esc` 返回）、鼠标滚轮与悬停高亮 |
-| **iPad（iPadOS）** | 横竖屏自适应：横屏侧边导航栏 + 双栏详情；竖屏底部导航栏 + 3~4 列网格 | 触控点击、全屏播放器手势（单击显隐、双击暂停、左右滑动快进快退、上下滑动调节音量、长按 2.0× 倍速） |
-| **iPhone（iOS）** | 竖屏优先底部毛玻璃导航栏（`NavigationBar`）+ 2~3 列紧凑海报墙 + 上下流式详情页 | 单手大拇指底部导航、播放器全套触控手势与横竖屏切换 |
-| **Android（手机 / 平板 / 电视）** | 由根目录原生工程构建三合一自适应 APK（支持 `.jar` `csp_` 插件与 Media3 软解扩展） | 自动识别电视遥控器、平板分栏与手机竖屏触控手势 |
+- 四栏 Dock：竖屏底部，横屏右侧；拖动预览，松手切换。宽屏详情采用分栏布局。
+- 设置一级只显示分类标题，当前值和说明在二级页面。
+- 片源选择显示分组与数量；管理页面可调整顺序、删除单条来源并保存。
+- 桌面播放器支持 F / 双击全屏、Esc 先退出全屏、空格暂停、方向键快进快退及调节音量。移动端使用方向切换和触控操作。
+- 玻璃材质参考 Glasswork；支持的 Flutter 渲染器使用折射 shader，其他环境使用模糊回退，减少透明度选项使用实色。效果仍须在对应设备验收。
 
-## 与安卓端互通备份
+## 备份与恢复
 
-在「设置 → 备份与恢复」中导出的 JSON 备份文件（`schema: marco-movie-backup`）可直接在 Windows、Mac、iPhone、iPad 与 Android 电视/手机端之间互相导入，自动同步：
-- 配置地址与自定义 JSON 配置内容
-- 收藏夹列表（最多 120 条）
-- 观看历史与剧集播放进度（最多 60 条）
-- 播放倍速、片头片尾跳过、剧集正倒序等偏好设置
+备份是用户主动导出/导入 JSON，**不是云端自动同步**。Flutter 备份包含公开订阅、禁用状态、线路管理、收藏/历史、播放和外观偏好；恢复替换公开订阅并保留当前设备的私密订阅。常规导出排除私密订阅及混合订阅内标记为私密的来源。
 
-## 云端自动打包（无需本机安装 Xcode 或 Visual Studio）
+Android 可读取共用的配置、历史、收藏字段；不应通过 Android 再导出后假定所有 Flutter 专用字段仍保留。恢复前校验数据结构；存储介质故障不具备数据库事务保证。
 
-仓库已配置 GitHub Actions 多平台自动构建流水线（[`.github/workflows/build-multiplatform.yml`](../.github/workflows/build-multiplatform.yml)）。推送代码或在 GitHub Actions 页面点击 **Run workflow** 即可自动生成：
-- `MarcoMovie-Android-universal.apk`（安卓手机 + 平板 + 电视三合一安装包）
-- `MarcoMovie-Windows-x64.zip`（Windows 64 位桌面免安装版）
-- `MarcoMovie-macOS-universal.zip`（Mac 苹果电脑应用包 `.app`）
-- `MarcoMovie-iOS-unsigned.ipa`（iPhone / iPad 安装包，可通过爱思助手、AltStore、SideStore 或 Sideloadly 签名安装）
+## 构建
 
-## 本地开发与构建命令
+当前流水线固定 Flutter **3.38.9**，并提交 `pubspec.lock` 保持依赖可复现。iOS 14 目标必须检查实际 Flutter 引擎、原生插件和 Framework 最低系统版本，不能只修改 Info.plist 或二进制声明。Windows 机器不能完成 iOS 编译及真机验收。
 
-如果本机已安装 Flutter SDK（3.22+）：
-
-```bash
+```sh
 cd flutter
-python -c "import shutil; shutil.copytree('src', 'lib', dirs_exist_ok=True)"
 flutter create --platforms=windows,macos,ios --project-name=marco_movie .
-python -c "import shutil; shutil.copytree('src', 'lib', dirs_exist_ok=True)"
+python prepare_platform.py
 flutter pub get
-
-# 运行单元测试
+cmake -S packages/quickjs_engine/native -B packages/quickjs_engine/native/build -DCMAKE_BUILD_TYPE=Release
+cmake --build packages/quickjs_engine/native/build --config Release --parallel 4
 flutter test
-
-# Windows 桌面端编译
 flutter build windows --release
-
-# macOS 桌面端编译（需在 Mac 上执行）
+# 以下在 Mac 上执行
 flutter build macos --release
-
-# iOS / iPadOS 编译（需在 Mac 上执行）
 flutter build ios --release --no-codesign
 ```
+
+`src/` 为受版本控制的源码，`prepare_platform.py` 同步到生成目录 `lib/` 并准备品牌资源、平台配置。不要只修改生成的 `lib/`。自动构建入口见 [workflow](../.github/workflows/build-multiplatform.yml)；产物名称以实际上传的附件为准。

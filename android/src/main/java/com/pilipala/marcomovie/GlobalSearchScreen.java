@@ -702,7 +702,7 @@ public final class GlobalSearchScreen implements AutoCloseable {
         final int serial = ++searchSerial;
         List<Cms.Site> sources = new ArrayList<>();
         if (a.config != null)
-            for (Cms.Site site : a.config.sites)
+            for (Cms.Site site : SourcePreferences.prioritized(a, a.config.sites))
                 if (site.searchable && a.available(site)) sources.add(site);
         // Only changes scheduling order; every available searchable source participates.
         final String selected = a.prefs.getString(Prefs.SELECTED_SITE, "");

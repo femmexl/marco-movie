@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'cms_parser.dart';
+import 'trailer_source.dart';
 import 'models.dart';
 
 typedef CspHttpTextFetcher = Future<String> Function(
@@ -25,11 +26,18 @@ class CspBridge {
     final lowerApi = site.api.trim().toLowerCase();
     if (lowerApi.startsWith('csp_')) return true;
     final cleanApi = lowerApi.split('?').first;
-    if (cleanApi.endsWith('.js') || cleanApi.endsWith('.py') || cleanApi.endsWith('.jar')) {
+    if (cleanApi.endsWith('.js') || cleanApi.endsWith('.mjs') || cleanApi.endsWith('.py') || cleanApi.endsWith('.jar')) {
       return true;
     }
     return false;
   }
+
+  static bool hasAdapter(CmsSite site) => site.isJavaScriptSource || site.isPythonSource || TrailerSource.matches(site) || hasBuiltinAdapter(site);
+
+  static bool hasBuiltinAdapter(CmsSite site) =>
+      !site.api.startsWith('csp_Local') && (isDoubanSite(site) || isMyDriveSite(site) || isBiliSite(site) ||
+      isTuxiaobeiSite(site) || isFirstAidSite(site) || isHuyaSite(site) ||
+      isDouyuSite(site) || backendsForSite(site).isNotEmpty);
 
   static bool isDoubanSite(CmsSite site) {
     final lowerApi = site.api.toLowerCase();
@@ -187,6 +195,7 @@ class CspBridge {
     CmsSite site,
     CspHttpTextFetcher fetchText,
   ) async {
+    if (TrailerSource.matches(site)) return ([TrailerSource.category], await TrailerSource.list(1, '', fetchText));
     if (isDoubanSite(site)) {
       return _fetchDoubanHome(fetchText);
     }
@@ -218,6 +227,7 @@ class CspBridge {
     CspHttpTextFetcher fetchText, {
     List<String> childIds = const [],
   }) async {
+    if (TrailerSource.matches(site)) return TrailerSource.list(page, '', fetchText);
     if (isDoubanSite(site)) {
       return _fetchDoubanCategory(categoryId, page, fetchText);
     }
@@ -274,6 +284,7 @@ class CspBridge {
     int page,
     CspHttpTextFetcher fetchText,
   ) async {
+    if (TrailerSource.matches(site)) return TrailerSource.list(page, keyword, fetchText);
     if (isDoubanSite(site) || isMyDriveSite(site)) {
       return _fetchVodPoolSearch(site, keyword, page, fetchText);
     }
@@ -295,6 +306,7 @@ class CspBridge {
     CmsVideo fallback,
     CspHttpTextFetcher fetchText,
   ) async {
+    if (TrailerSource.matches(site)) return TrailerSource.detail(fallback, fetchText);
     if (isTuxiaobeiSite(site)) {
       final cleanId = fallback.id.contains(r'$')
           ? fallback.id.split(r'$').last.split('@@').first
@@ -447,6 +459,7 @@ class CspBridge {
     CmsEpisode episode,
     CspHttpTextFetcher fetchText,
   ) async {
+    if (TrailerSource.matches(site)) return TrailerSource.resolve(episode, fetchText);
     final rawUrl = episode.url.trim();
 
     // 1. Tuxiaobei `/play/{id}` -> extract `video-src` MP4
@@ -1315,6 +1328,9 @@ class CspBridge {
     CspHttpTextFetcher fetchText,
   ) async {
     final backends = backendsForSite(site);
+    if (backends.isEmpty) {
+      throw const FormatException('这个来源需要专用插件运行环境，当前设备没有可调用的接口。可切换到标准点播源，或在支持该扩展的设备上打开。');
+    }
     for (final backend in backends.take(4)) {
       try {
         final listUri = Uri.parse(backend.api).replace(queryParameters: {'ac': 'list'});

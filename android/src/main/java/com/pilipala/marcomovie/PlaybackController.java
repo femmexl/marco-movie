@@ -365,7 +365,22 @@ final class PlaybackController {
                                         () -> {
                                             if (serial != a.playbackResolveSerial
                                                     || ticket != a.generation
-                                                    || a.isFinishing()) return;
+                                                    || a.isFinishing()) {
+                                                JSONObject unused =
+                                                        resolved.media.optJSONObject("embySession");
+                                                if (unused != null
+                                                        && s.api.startsWith(
+                                                                com.pilipala.emby.EmbyLibrary
+                                                                        .PREFIX))
+                                                    try {
+                                                        com.pilipala.emby.EmbyAccounts.open(
+                                                                        a, s.api)
+                                                                .track(unused)
+                                                                .stop(0);
+                                                    } catch (Exception ignored) {
+                                                    }
+                                                return;
+                                            }
                                             try {
                                                 if (switchedLine) {
                                                     a.activeLine = finalLine;
@@ -674,7 +689,7 @@ final class PlaybackController {
         if (!a.back.isEmpty()) {
             releasePlayer(a);
             a.current = a.back.pop();
-            a.current.render.run();
+            a.renderReturn(a.current);
             a.restore(a.current);
         } else a.onBackPressed();
     }
@@ -721,8 +736,22 @@ final class PlaybackController {
                 }
         } catch (Exception ignored) {
         }
+        JSONObject embySession = ep.media.optJSONObject("embySession");
+        com.pilipala.emby.EmbyLibrary.Reporter retained = a.embyReporter;
+        if (retained != null && retained.matches(embySession)) a.embyReporter = null;
+        else retained = null;
         releasePlayer(a);
+        a.embyReporter = retained;
         a.playingBookmark = null;
+        if (s.api.startsWith(com.pilipala.emby.EmbyLibrary.PREFIX) && embySession != null) {
+            try {
+                if (a.embyReporter == null)
+                    a.embyReporter =
+                            com.pilipala.emby.EmbyAccounts.open(a, s.api).track(embySession);
+            } catch (Exception ignored) {
+                // Check-in setup must not prevent an already resolved video from playing.
+            }
+        }
         if (s.key != null
                 && !s.key.equals("live")
                 && v.id != null
@@ -929,6 +958,7 @@ final class PlaybackController {
                                                             mp -> {
                                                                 if (ticket != a.generation) return;
                                                                 a.playing = false;
+                                                                stopEmbySession(a);
                                                                 a.playStatus.setText("播放结束");
                                                                 controls.completed();
                                                             });
@@ -1025,6 +1055,7 @@ final class PlaybackController {
                                                                             });
                                                                     return true;
                                                                 }
+                                                                stopEmbySession(a);
                                                                 a.prepared = false;
                                                                 a.playing = false;
                                                                 if (a.playerChrome != null)
@@ -1123,6 +1154,10 @@ final class PlaybackController {
         if (ticket != a.generation || a.player == null || !a.prepared) return;
         savePlaybackHistory(a, false);
         try {
+            if (a.playbackControls != null)
+                a.playbackControls.surface.setFrameAdvancing(a.player.isPlaying());
+            if (a.embyReporter != null)
+                a.embyReporter.update(a.player.getCurrentPosition(), !a.player.isPlaying());
             if (a.seekGesture.active) previewSeek(a);
             else if (a.playbackControls == null || !a.playbackControls.isUserSeeking()) {
                 int rawPos = a.player.getCurrentPosition();
@@ -1148,6 +1183,18 @@ final class PlaybackController {
 
     static void togglePlayback(MainActivity a) {
         if (a.player == null || !a.prepared) return;
+        if (a.embyReporter == null
+                && a.playbackControls != null
+                && a.playbackControls.site.api.startsWith(com.pilipala.emby.EmbyLibrary.PREFIX)) {
+            a.resumeAt = -1;
+            resolvePlayer(
+                    a,
+                    a.playbackControls.site,
+                    a.playbackControls.video,
+                    a.activeLine,
+                    a.activeEpisode);
+            return;
+        }
         try {
             if (a.player.isPlaying()) {
                 a.player.pause();
@@ -1165,6 +1212,8 @@ final class PlaybackController {
                                 : "正在播放 · 双击暂停 · 左右滑快进 · 上下滑调亮度音量");
             }
             if (a.playerChrome != null) a.playerChrome.update();
+            if (a.embyReporter != null)
+                a.embyReporter.update(a.player.getCurrentPosition(), !a.playing);
         } catch (Exception error) {
             AppLog.w("PlaybackController", "togglePlayback failed", error);
         }
@@ -1284,10 +1333,22 @@ final class PlaybackController {
         }
     }
 
+    static void stopEmbySession(MainActivity a) {
+        if (a.embyReporter == null) return;
+        int position = 0;
+        try {
+            if (a.player != null && a.prepared) position = a.player.getCurrentPosition();
+        } catch (Exception ignored) {
+        }
+        a.embyReporter.stop(position);
+        a.embyReporter = null;
+    }
+
     static void releasePlayer(MainActivity a) {
         finishSeek(a, false);
         a.clearLiveNumber();
         savePlaybackHistory(a, true);
+        stopEmbySession(a);
         a.miniMode = false;
         a.miniDetails = null;
         if (a.playbackControls != null) a.playbackControls.close();

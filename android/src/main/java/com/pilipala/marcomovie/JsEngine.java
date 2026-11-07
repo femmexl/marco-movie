@@ -38,9 +38,10 @@ public final class JsEngine implements SourceEngine {
     private boolean catApi;
 
     public static boolean eligible(Cms.Site s) {
+        if (s.type == 3 && "csp_LocalPython".equals(s.api) && s.ext instanceof String) return true;
         return s.type == 3
                 && (Cms.isHttp(s.api) || (s.api != null && s.api.startsWith("file://")))
-                && s.api.split("\\?", 2)[0].toLowerCase(Locale.ROOT).endsWith(".js");
+                && s.api.split("[?#]", 2)[0].toLowerCase(Locale.ROOT).matches(".*\\.(m?js|py)");
     }
 
     public JsEngine(Application application, Cms.Config config, Cms.Site selected)
@@ -161,7 +162,7 @@ public final class JsEngine implements SourceEngine {
                                 || Cms.isHttp(name)
                                 || name.startsWith("file://")) return name;
                         try {
-                            return new URL(new URL(parent), name).toString();
+                            return Cms.resolve(parent, name);
                         } catch (Exception e) {
                             return name;
                         }
@@ -176,9 +177,37 @@ public final class JsEngine implements SourceEngine {
                         }
                     }
                 });
-        String source = module(site.api);
+        boolean inlinePython = "csp_LocalPython".equals(site.api);
+        boolean checkedScript =
+                site.ext instanceof JSONObject && ((JSONObject) site.ext).has("_mm_entrySource");
+        if (checkedScript)
+            modules.put(site.api, ((JSONObject) site.ext).getString("_mm_entrySource"));
+        String source = inlinePython ? (String) site.ext : module(site.api);
         catApi = source.contains("__jsEvalReturn") && !source.contains("export default");
-        if (catApi) {
+        if (inlinePython || site.api.split("[?#]", 2)[0].toLowerCase(Locale.ROOT).endsWith(".py")) {
+            catApi = false;
+            bind(
+                    global,
+                    "__readPythonSibling",
+                    args -> {
+                        String name = string(args, 0);
+                        if (!site.api.startsWith("file://")
+                                || !name.matches("(?:[A-Za-z_]\\w*/)*[A-Za-z_]\\w*\\.py"))
+                            return null;
+                        File parent =
+                                new File(new URI(site.api)).getCanonicalFile().getParentFile();
+                        File sibling = new File(parent, name).getCanonicalFile();
+                        if (!sibling.getPath().startsWith(parent.getPath() + File.separator)
+                                || !sibling.isFile()) return null;
+                        return module(Cms.fileUri(sibling));
+                    });
+            for (String file : new String[] {"skulpt.min.js", "skulpt-stdlib.js", "spider.js"})
+                context.evaluate(asset("python-host/" + file), file);
+            context.evaluate(
+                    "globalThis.__movieSpider=createPythonSpider("
+                            + JSONObject.quote(source)
+                            + ",{},__readPythonSibling);void 0;");
+        } else if (catApi) {
             context.evaluate(source, site.api);
             context.evaluate("globalThis.__movieSpider=__jsEvalReturn();");
         } else
@@ -187,7 +216,7 @@ public final class JsEngine implements SourceEngine {
                             + JSONObject.quote(site.api)
                             + ";globalThis.__movieSpider=spider;",
                     site.api + ".host-entry.mjs");
-        Object ext = site.ext == null ? "" : site.ext;
+        Object ext = inlinePython || checkedScript || site.ext == null ? "" : site.ext;
         String value =
                 ext instanceof JSONObject || ext instanceof JSONArray
                         ? ext.toString()
@@ -245,7 +274,7 @@ public final class JsEngine implements SourceEngine {
         else if (Cms.isHttp(name)) found = download(name);
         else if (name.startsWith("file://")) {
             File localFile = new File(URI.create(name));
-            String allowedPrefix = app.getFilesDir().getCanonicalPath();
+            String allowedPrefix = app.getFilesDir().getCanonicalPath() + File.separator;
             if (!localFile.isFile() || !localFile.getCanonicalPath().startsWith(allowedPrefix)) {
                 throw new IOException("本地 JS 模块路径不可用");
             }
@@ -463,7 +492,7 @@ public final class JsEngine implements SourceEngine {
     }
 
     public String home() throws Exception {
-        return call("home", false);
+        return call("home", true);
     }
 
     public String homeVideos() throws Exception {
@@ -471,7 +500,12 @@ public final class JsEngine implements SourceEngine {
     }
 
     public String category(String id, int page) throws Exception {
-        return call("category", id, page, false, new JSONObject());
+        return category(id, page, java.util.Collections.emptyMap());
+    }
+
+    public String category(String id, int page, java.util.Map<String, String> filters)
+            throws Exception {
+        return call("category", id, page, true, new JSONObject(filters));
     }
 
     public String detail(String id) throws Exception {

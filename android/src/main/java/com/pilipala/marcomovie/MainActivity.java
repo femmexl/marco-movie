@@ -111,6 +111,7 @@ public final class MainActivity extends Activity {
     Runnable hideControls;
     PlayerChrome playerChrome;
     MoviePlayer player;
+    com.pilipala.emby.EmbyLibrary.Reporter embyReporter;
     String configOrigin = "";
     TextView playStatus, playClock;
     final SeekGesture seekGesture = new SeekGesture();
@@ -144,6 +145,7 @@ public final class MainActivity extends Activity {
         final EpisodeSelection selection = new EpisodeSelection();
         boolean player, home;
         HomeScreen.State homeState;
+        HomeScreen retainedHome;
 
         /** True while a listing redirect (folder / action / cross-search) has not drawn a page. */
         boolean redirect;
@@ -486,6 +488,8 @@ public final class MainActivity extends Activity {
             if (f.exists())
                 try (InputStream i = new FileInputStream(f)) {
                     config = Cms.parseConfig(Cms.read(i, Cms.MAX_JSON), configOrigin);
+                    SourcePicker.applyEdits(this, config, configOrigin);
+                    SourcePreferences.restoreDefault(this);
                 }
         } catch (Exception e) {
             AppLog.w("MainActivity", "load saved config failed", e);
@@ -619,6 +623,11 @@ public final class MainActivity extends Activity {
 
     int dp(float x) {
         return Math.round(x * getResources().getDisplayMetrics().density);
+    }
+
+    void glass(View view, float radius) {
+        com.pilipala.glass.GlassworkSurface.attach(
+                view, root, dp(radius), () -> prefs.getBoolean(Prefs.REDUCED_TRANSPARENCY, false));
     }
 
     GradientDrawable bg(int color, float radius) {
@@ -755,7 +764,7 @@ public final class MainActivity extends Activity {
         renderPage(title, eyebrow, false);
     }
 
-    void renderPage(String title, String eyebrow, boolean navigation) {
+    void preparePage(boolean navigation) {
         clearPlaybackLoading();
         cancelArtwork();
         cancelPageRequests();
@@ -771,6 +780,10 @@ public final class MainActivity extends Activity {
             applyMobileSystemBars(false);
         }
         generation++;
+    }
+
+    void renderPage(String title, String eyebrow, boolean navigation) {
+        preparePage(navigation);
         root = new FrameLayout(this);
         root.setBackgroundColor(DARK);
         root.addView(ImageLoader.createAtmosphere(this), new FrameLayout.LayoutParams(-1, -1));
@@ -932,6 +945,11 @@ public final class MainActivity extends Activity {
         restore(s);
     }
 
+    void renderReturn(Screen screen) {
+        if (isTvDevice() && screen.retainedHome != null && screen.retainedHome.resume()) return;
+        screen.render.run();
+    }
+
     @Override
     public void onBackPressed() {
         if (playbackLoading != null) {
@@ -958,11 +976,11 @@ public final class MainActivity extends Activity {
                 if (!back.isEmpty()) back.pop();
                 if (!back.isEmpty()) {
                     current = back.pop();
-                    current.render.run();
+                    renderReturn(current);
                     restore(current);
                 } else {
                     current = new Screen(this::home);
-                    current.render.run();
+                    renderReturn(current);
                 }
                 return;
             }
@@ -976,7 +994,7 @@ public final class MainActivity extends Activity {
             if (!isTvDevice() && !back.isEmpty()) {
                 capture();
                 current = back.pop();
-                current.render.run();
+                renderReturn(current);
                 restore(current);
                 return;
             }
@@ -992,7 +1010,7 @@ public final class MainActivity extends Activity {
         if (!back.isEmpty()) {
             capture();
             current = back.pop();
-            current.render.run();
+            renderReturn(current);
             restore(current);
         } else {
             releasePlayer();
@@ -1011,14 +1029,41 @@ public final class MainActivity extends Activity {
     void toast(String message) {
         final FrameLayout parent = root;
         if (parent == null) return;
+        View previous = parent.findViewWithTag("app-toast");
+        if (previous != null && previous.getParent() == parent) parent.removeView(previous);
         TextView tip = text(message, 14, WHITE);
         tip.setGravity(Gravity.CENTER);
         tip.setPadding(dp(22), dp(12), dp(22), dp(12));
-        tip.setBackground(bg(0xf535353c, 22));
+        glass(tip, 22);
         tip.setTag("app-toast");
         FrameLayout.LayoutParams size =
                 new FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
         size.bottomMargin = dp(24);
+        View dock = parent.findViewWithTag("home-dock");
+        if (dock != null
+                && dock.getVisibility() == View.VISIBLE
+                && dock.getLayoutParams() instanceof FrameLayout.LayoutParams) {
+            FrameLayout.LayoutParams rail = (FrameLayout.LayoutParams) dock.getLayoutParams();
+            if ((rail.gravity & Gravity.VERTICAL_GRAVITY_MASK) == Gravity.BOTTOM) {
+                size.bottomMargin =
+                        Math.max(
+                                size.bottomMargin,
+                                Math.max(dock.getHeight(), rail.height)
+                                        + rail.bottomMargin
+                                        + dp(10));
+            } else {
+                size.rightMargin =
+                        Math.max(dock.getWidth(), rail.width) + rail.rightMargin + dp(10);
+            }
+            tip.setElevation(dock.getElevation() + dp(1));
+        }
+        android.graphics.Rect visible = new android.graphics.Rect();
+        parent.getWindowVisibleDisplayFrame(visible);
+        int[] xy = new int[2];
+        parent.getLocationOnScreen(xy);
+        size.bottomMargin =
+                Math.max(size.bottomMargin, xy[1] + parent.getHeight() - visible.bottom + dp(10));
+        tip.setMaxWidth(Math.max(dp(80), parent.getWidth() - size.rightMargin - dp(32)));
         parent.addView(tip, size);
         ui.postDelayed(() -> parent.removeView(tip), 2600);
     }
@@ -1476,6 +1521,7 @@ public final class MainActivity extends Activity {
             try {
                 player.pause();
                 playing = false;
+                if (embyReporter != null) embyReporter.update(player.getCurrentPosition(), true);
                 if (playStatus != null) playStatus.setText("已暂停 · 按确认继续");
             } catch (Exception ignored) {
             }

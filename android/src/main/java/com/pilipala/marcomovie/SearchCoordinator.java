@@ -38,6 +38,20 @@ public final class SearchCoordinator implements AutoCloseable {
                         t.setDaemon(true);
                         return t;
                     });
+    // Host-managed HTTP requests can be cancelled. Keep them out of the pool
+    // used by native plugins, which may ignore both interruption and timeouts.
+    private static final ThreadPoolExecutor HTTP_NETWORK =
+            new ThreadPoolExecutor(
+                    4,
+                    4,
+                    30,
+                    TimeUnit.SECONDS,
+                    new ArrayBlockingQueue<Runnable>(64),
+                    r -> {
+                        Thread t = new Thread(r, "movie-http-search");
+                        t.setDaemon(true);
+                        return t;
+                    });
     private static final ScheduledExecutorService TIMER =
             Executors.newSingleThreadScheduledExecutor(
                     r -> {
@@ -139,7 +153,15 @@ public final class SearchCoordinator implements AutoCloseable {
             job.allocated = true;
             inFlight++;
             try {
-                job.future = RequestScope.submit(NETWORK, job);
+                job.future =
+                        RequestScope.submit(
+                                job.site.supported()
+                                                || (job.site.api != null
+                                                        && job.site.api.startsWith(
+                                                                "emby://account/"))
+                                        ? HTTP_NETWORK
+                                        : NETWORK,
+                                job);
             } catch (RejectedExecutionException busy) {
                 job.finish(Collections.emptyList(), Outcome.BUSY);
             }
@@ -251,5 +273,6 @@ public final class SearchCoordinator implements AutoCloseable {
         if (deadline != null) deadline.cancel(false);
         for (Job job : jobs) job.cancel();
         NETWORK.purge();
+        HTTP_NETWORK.purge();
     }
 }

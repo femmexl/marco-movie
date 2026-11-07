@@ -15,6 +15,11 @@ public final class HomeProbe extends Instrumentation {
     MainActivity a;
     final CountDownLatch launched = new CountDownLatch(1);
     final JSONObject result = new JSONObject();
+    final java.util.concurrent.atomic.AtomicInteger homeRequests =
+            new java.util.concurrent.atomic.AtomicInteger();
+    final java.util.concurrent.atomic.AtomicInteger categoryRequests =
+            new java.util.concurrent.atomic.AtomicInteger();
+    volatile java.util.Map<String, String> receivedFilters = new java.util.LinkedHashMap<>();
 
     @Override
     public void callActivityOnCreate(Activity activity, Bundle state) {
@@ -293,7 +298,35 @@ public final class HomeProbe extends Instrumentation {
                                     boolean failed;
 
                                     public String home() throws Exception {
+                                        homeRequests.incrementAndGet();
                                         JSONObject o = new JSONObject(listing("推荐", 12, 1));
+                                        JSONObject schemas = new JSONObject();
+                                        JSONArray dimensions = new JSONArray();
+                                        for (String[] item :
+                                                new String[][] {
+                                                    {"class", "类型", "剧情"},
+                                                    {"area", "地区", "美国"},
+                                                    {"year", "年份", "2026"}
+                                                }) {
+                                            dimensions.put(
+                                                    new JSONObject()
+                                                            .put("key", item[0])
+                                                            .put("name", item[1])
+                                                            .put(
+                                                                    "value",
+                                                                    new JSONArray()
+                                                                            .put(
+                                                                                    new JSONObject()
+                                                                                            .put(
+                                                                                                    "n",
+                                                                                                    item[
+                                                                                                            2])
+                                                                                            .put(
+                                                                                                    "v",
+                                                                                                    item[
+                                                                                                            2]))));
+                                        }
+                                        o.put("filters", schemas.put("c2", dimensions));
                                         JSONArray cats = new JSONArray();
                                         for (int i = 1; i <= 7; i++)
                                             cats.put(
@@ -314,7 +347,17 @@ public final class HomeProbe extends Instrumentation {
                                         return o.put("class", cats).toString();
                                     }
 
+                                    public String category(
+                                            String id,
+                                            int page,
+                                            java.util.Map<String, String> filters)
+                                            throws Exception {
+                                        receivedFilters = new java.util.LinkedHashMap<>(filters);
+                                        return category(id, page);
+                                    }
+
                                     public String category(String id, int page) throws Exception {
+                                        categoryRequests.incrementAndGet();
                                         if (id.equals("c1")) SystemClock.sleep(850);
                                         if (id.equals("c3") && !failed) {
                                             failed = true;
@@ -692,6 +735,8 @@ public final class HomeProbe extends Instrumentation {
                     "source_menu_back_preserves_home",
                     ui(() -> a.sourceDialog == null && a.current.home));
 
+            View retainedHome = a.root;
+            int homeCount = homeRequests.get(), categoryCount = categoryRequests.get();
             click("home-video:11");
             await(() -> tag("detail-favorite") != null);
             check("details_hide_nav", ui(this::noNav));
@@ -705,6 +750,50 @@ public final class HomeProbe extends Instrumentation {
                                     a.current.homeState.category.equals("c2")
                                             && a.current.homeState.page == 2));
             check("back_restores_card_focus", ui(() -> tag("home-video:11").hasFocus()));
+            check("back_reattaches_same_home_tree", ui(() -> a.root == retainedHome));
+            check(
+                    "detail_return_sends_no_catalogue_requests",
+                    homeRequests.get() == homeCount && categoryRequests.get() == categoryCount);
+            for (int dimension = 0; dimension < 3; dimension++) {
+                final int choice = dimension;
+                click("home-filters");
+                runOnMainSync(
+                        () ->
+                                a.appDialog
+                                        .findViewById(android.R.id.content)
+                                        .findViewWithTag("dialog-option:" + choice)
+                                        .performClick());
+                await(() -> a.appDialog != null);
+                runOnMainSync(
+                        () ->
+                                a.appDialog
+                                        .findViewById(android.R.id.content)
+                                        .findViewWithTag("dialog-option:1")
+                                        .performClick());
+                await(
+                        () ->
+                                a.current.homeState.ready
+                                        && a.current.homeState.selectedFilters.size() == choice + 1
+                                        && tag("home-video:2") != null);
+            }
+            check(
+                    "all_three_tv_filters_reach_engine",
+                    receivedFilters.size() == 3 && receivedFilters.get("year").equals("2026"));
+            View filteredHome = a.root;
+            int filteredCount = categoryRequests.get();
+            click("home-video:2");
+            await(() -> tag("detail-favorite") != null);
+            key(KeyEvent.KEYCODE_BACK);
+            await(() -> tag("home-video:2") != null);
+            check(
+                    "filtered_home_stays_resident",
+                    ui(
+                            () ->
+                                    a.root == filteredHome
+                                            && a.current.homeState.selectedFilters.size() == 3
+                                            && tag("home-video:2").hasFocus()));
+            check("filtered_return_does_not_reload", categoryRequests.get() == filteredCount);
+
             click("home-tab:3");
             await(() -> tag("home-load-more").isShown());
             check(

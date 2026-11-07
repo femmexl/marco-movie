@@ -50,7 +50,7 @@ final class AppDialog extends Dialog {
         LinearLayout panel = a.vertical();
         panel.setTag("app-dialog");
         panel.setPadding(a.dp(24), a.dp(22), a.dp(24), a.dp(16));
-        panel.setBackground(a.bg(0xff25252b, 28));
+        a.glass(panel, 28);
         if (spec.title != null) {
             TextView title = a.text(spec.title, 23, MainActivity.WHITE);
             title.setTypeface(null, Typeface.BOLD);

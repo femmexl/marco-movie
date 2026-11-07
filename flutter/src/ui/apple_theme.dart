@@ -26,7 +26,7 @@ class AppleColors {
   static const Color systemOrange = Color(0xFFFF9F0A);
   static const Color systemRed = Color(0xFFFF453A);
   static const Color labelPrimary = Color(0xFFF5F5F7);
-  static const Color labelSecondary = Color(0x9EEBEBF5);
+  static const Color labelSecondary = Color(0xFFD1D1DA);
   static const Color labelTertiary = Color(0x52EBEBF5);
   static const Color separator = Color(0x29FFFFFF);
   static const Color glassBorder = Color(0x26FFFFFF);
@@ -159,10 +159,12 @@ List<double> _saturationMatrix(double s) {
   ];
 }
 
-/// iOS 27 Liquid Glass backdrop: blur first, then lift saturation.
-ImageFilter liquidGlassFilter({double blur = 22, double saturation = 1.7}) {
+/// Glasswork dark material filter, from glass.css: 2px blur, 160% saturation, 80% brightness.
+ImageFilter liquidGlassFilter({double blur = 2, double saturation = 1.6, double brightness = .8}) {
+  final matrix = _saturationMatrix(saturation);
+  for (var i = 0; i < 15; i++) { matrix[i] *= brightness; }
   return ImageFilter.compose(
-    outer: ColorFilter.matrix(_saturationMatrix(saturation)),
+    outer: ColorFilter.matrix(matrix),
     inner: ImageFilter.blur(
       sigmaX: blur,
       sigmaY: blur,
@@ -192,10 +194,10 @@ class _LiquidRimPainter extends CustomPainter {
         begin: Alignment.topLeft,
         end: Alignment.bottomRight,
         colors: [
-          Colors.white.withValues(alpha: 0.62 * strength),
+          Colors.white.withValues(alpha: 0.46 * strength),
           Colors.white.withValues(alpha: 0.14 * strength),
           Colors.white.withValues(alpha: 0.05 * strength),
-          Colors.white.withValues(alpha: 0.30 * strength),
+          Colors.white.withValues(alpha: 0.18 * strength),
         ],
         stops: const [0.0, 0.32, 0.68, 1.0],
       ).createShader(rect);
@@ -222,7 +224,61 @@ class _LiquidRimPainter extends CustomPainter {
       old.shape != shape || old.strength != strength;
 }
 
-/// Reusable iOS 27 Liquid Glass material: saturated optical blur, a light
+/// Native equivalent of Glasswork's clipped rim, with an inexpensive blur on
+/// renderers that cannot sample the backdrop through a fragment shader.
+class GlassworkBackdrop extends StatefulWidget {
+  static final reduceTransparency = ValueNotifier<bool>(false);
+  final double radius;
+  final Widget child;
+  const GlassworkBackdrop({super.key, required this.radius, required this.child});
+  @override
+  State<GlassworkBackdrop> createState() => _GlassworkBackdropState();
+}
+
+class _GlassworkBackdropState extends State<GlassworkBackdrop> {
+  static Future<FragmentProgram>? _program;
+  FragmentShader? _shader;
+  @override
+  void initState() {
+    super.initState();
+    if (ImageFilter.isShaderFilterSupported) _loadLens();
+  }
+  Future<void> _loadLens() async {
+    try {
+      final program = await (_program ??= FragmentProgram.fromAsset('shaders/glasswork.frag'));
+      if (mounted) setState(() => _shader = program.fragmentShader());
+    } catch (_) {
+      // Fallback is also used while the GPU program is being prepared.
+    }
+  }
+  @override
+  void dispose() {
+    _shader?.dispose();
+    super.dispose();
+  }
+  @override
+  Widget build(BuildContext context) {
+    return ValueListenableBuilder<bool>(
+      valueListenable: GlassworkBackdrop.reduceTransparency,
+      builder: (context, reduce, _) {
+        if (reduce || MediaQuery.highContrastOf(context) || MediaQuery.disableAnimationsOf(context)) {
+          return ColoredBox(color: const Color(0xff1e1e22), child: widget.child);
+        }
+        final shader = _shader;
+        if (shader != null) {
+          shader.setFloat(2, widget.radius);
+          shader.setFloat(3, MediaQuery.devicePixelRatioOf(context));
+        }
+        return BackdropFilter(
+          filter: shader == null ? liquidGlassFilter(blur: 2, saturation: 1.6) : ImageFilter.shader(shader),
+          child: shader == null ? ColoredBox(color: const Color(0xb31e1e22), child: widget.child) : widget.child,
+        );
+      },
+    );
+  }
+}
+
+/// Reusable Glasswork material: saturated optical blur, a light
 /// top-to-bottom refraction tint, specular rim and a soft floating shadow.
 /// Uses continuous (superellipse) corners like system controls.
 class LiquidGlass extends StatelessWidget {
@@ -240,9 +296,9 @@ class LiquidGlass extends StatelessWidget {
     super.key,
     required this.child,
     this.borderRadius = 24,
-    this.tint = const Color(0x4D16161B),
-    this.blur = 22,
-    this.saturation = 1.7,
+    this.tint = const Color(0x001E1E22),
+    this.blur = 2,
+    this.saturation = 1.6,
     this.rimStrength = 1.0,
     this.elevated = true,
     this.padding,
@@ -252,7 +308,7 @@ class LiquidGlass extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final shape = RoundedSuperellipseBorder(
+    final shape = RoundedRectangleBorder(
       borderRadius: BorderRadius.circular(borderRadius),
     );
     Widget content = child;
@@ -278,7 +334,7 @@ class LiquidGlass extends StatelessWidget {
       child: ClipPath(
         clipper: ShapeBorderClipper(shape: shape),
         clipBehavior: Clip.antiAlias,
-        child: _isWindowsDesktop
+        child: (MediaQuery.highContrastOf(context) || MediaQuery.disableAnimationsOf(context))
             ? CustomPaint(
                 foregroundPainter:
                     _LiquidRimPainter(shape: shape, strength: rimStrength),
@@ -293,12 +349,12 @@ class LiquidGlass extends StatelessWidget {
                       colors: [
                         Color.alphaBlend(
                           const Color(0x28FFFFFF),
-                          tint.withValues(alpha: math.max(tint.a, 0.88)),
+                          tint.withValues(alpha: 1),
                         ),
-                        tint.withValues(alpha: math.max(tint.a, 0.88)),
+                        tint.withValues(alpha: 1),
                         Color.alphaBlend(
                           const Color(0x10FFFFFF),
-                          tint.withValues(alpha: math.max(tint.a, 0.88)),
+                          tint.withValues(alpha: 1),
                         ),
                       ],
                       stops: const [0.0, 0.55, 1.0],
@@ -307,8 +363,8 @@ class LiquidGlass extends StatelessWidget {
                   child: content,
                 ),
               )
-            : BackdropFilter(
-                filter: liquidGlassFilter(blur: blur, saturation: saturation),
+            : GlassworkBackdrop(
+                radius: borderRadius,
                 child: CustomPaint(
                   foregroundPainter:
                       _LiquidRimPainter(shape: shape, strength: rimStrength),
@@ -321,9 +377,9 @@ class LiquidGlass extends StatelessWidget {
                         begin: Alignment.topCenter,
                         end: Alignment.bottomCenter,
                         colors: [
-                          Color.alphaBlend(const Color(0x24FFFFFF), tint),
-                          tint,
-                          Color.alphaBlend(const Color(0x0DFFFFFF), tint),
+                          tint.withValues(alpha: math.min(tint.a, .025)),
+                          tint.withValues(alpha: math.min(tint.a, .025)),
+                          tint.withValues(alpha: math.min(tint.a, .025)),
                         ],
                         stops: const [0.0, 0.55, 1.0],
                       ),
@@ -430,7 +486,7 @@ class AppleGlassSurface extends StatelessWidget {
       child: ClipRRect(
         borderRadius: radius,
         clipBehavior: Clip.antiAlias,
-        child: _isWindowsDesktop
+        child: (MediaQuery.highContrastOf(context) || MediaQuery.disableAnimationsOf(context))
             ? CustomPaint(
                 foregroundPainter: border == null
                     ? _LiquidRimPainter(shape: shape, strength: 0.8)
@@ -461,9 +517,8 @@ class AppleGlassSurface extends StatelessWidget {
                   child: child,
                 ),
               )
-            : BackdropFilter(
-                filter:
-                    liquidGlassFilter(blur: blurSigma * 0.7, saturation: 1.6),
+            : GlassworkBackdrop(
+                radius: radius.topLeft.x,
                 child: CustomPaint(
                   foregroundPainter: border == null
                       ? _LiquidRimPainter(shape: shape, strength: 0.8)
@@ -477,11 +532,8 @@ class AppleGlassSurface extends StatelessWidget {
                         begin: Alignment.topCenter,
                         end: Alignment.bottomCenter,
                         colors: [
-                          Color.alphaBlend(
-                            const Color(0x1CFFFFFF),
-                            effectiveColor,
-                          ),
-                          effectiveColor,
+                          effectiveColor.withValues(alpha: math.min(effectiveColor.a, .025)),
+                          effectiveColor.withValues(alpha: math.min(effectiveColor.a, .025)),
                         ],
                       ),
                       borderRadius: radius,
@@ -529,6 +581,10 @@ class AppleLiquidGlassDock extends StatefulWidget {
     final right = MediaQuery.paddingOf(context).right;
     return _itemW + _pad * 2 + (right > 0 ? right + 4 : 10) + 8;
   }
+  static double portraitFootprint(BuildContext context) {
+    final safe = MediaQuery.paddingOf(context).bottom;
+    return _itemH + 2 * _pad + (safe > 0 ? math.max(safe - 4, 8) : 12) + 8;
+  }
 
   @override
   State<AppleLiquidGlassDock> createState() => _AppleLiquidGlassDockState();
@@ -556,16 +612,18 @@ class _AppleLiquidGlassDockState extends State<AppleLiquidGlassDock> {
     if (targetIndex != currentSelected) {
       _lastDragSelectedIndex = targetIndex;
       HapticFeedback.selectionClick();
-      widget.onSelect(targetIndex);
+      // Preview only. Commit the destination when the finger is released.
     }
   }
 
-  void _endSlide() {
+  void _endSlide({bool cancelled = false}) {
     if (_dragLensSlot == null && _lastDragSelectedIndex == null) return;
+    final target = _lastDragSelectedIndex;
     setState(() {
       _dragLensSlot = null;
       _lastDragSelectedIndex = null;
     });
+    if (!cancelled && target != null && target != _safeIndex) widget.onSelect(target);
   }
 
   @override
@@ -617,7 +675,7 @@ class _AppleLiquidGlassDockState extends State<AppleLiquidGlassDock> {
             onHorizontalDragUpdate: (d) =>
                 _updateSlidePosition(d.localPosition.dx, itemW),
             onHorizontalDragEnd: (_) => _endSlide(),
-            onHorizontalDragCancel: _endSlide,
+            onHorizontalDragCancel: () => _endSlide(cancelled: true),
             child: SizedBox(
               width: width,
               height:
@@ -684,7 +742,7 @@ class _AppleLiquidGlassDockState extends State<AppleLiquidGlassDock> {
             onVerticalDragUpdate: (d) =>
                 _updateSlidePosition(d.localPosition.dy, vItemH),
             onVerticalDragEnd: (_) => _endSlide(),
-            onVerticalDragCancel: _endSlide,
+            onVerticalDragCancel: () => _endSlide(cancelled: true),
             child: SizedBox(
               width:
                   AppleLiquidGlassDock._itemW + AppleLiquidGlassDock._pad * 2,
@@ -1151,27 +1209,8 @@ Future<T?> showAppleModalSheet<T>({
               maxWidth: effectiveMaxWidth,
               maxHeight: screenSize.height * 0.88,
             ),
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(26),
-              clipBehavior: Clip.antiAlias,
-              child: BackdropFilter(
-                filter: ImageFilter.blur(sigmaX: 44, sigmaY: 44),
-                child: Container(
-                  decoration: BoxDecoration(
-                    gradient: const LinearGradient(
-                      begin: Alignment.topLeft,
-                      end: Alignment.bottomRight,
-                      colors: [
-                        Color(0xDE24242C),
-                        Color(0xE817171C),
-                      ],
-                    ),
-                    borderRadius: BorderRadius.circular(26),
-                    border: Border.all(
-                      color: AppleColors.glassBorderStrong,
-                      width: 0.65,
-                    ),
-                  ),
+            child: LiquidGlass(
+              borderRadius: 26,
                   child: Material(
                     color: Colors.transparent,
                     child: SafeArea(
@@ -1226,8 +1265,6 @@ Future<T?> showAppleModalSheet<T>({
                       ),
                     ),
                   ),
-                ),
-              ),
             ),
           ),
         ),

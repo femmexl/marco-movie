@@ -1,3 +1,5 @@
+import 'dart:io';
+import 'package:window_manager/window_manager.dart';
 import 'dart:async';
 import 'dart:math' as math;
 import 'package:flutter/cupertino.dart';
@@ -6,6 +8,7 @@ import 'package:flutter/services.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import '../core/cms_client.dart';
+import '../core/emby_library.dart';
 import '../core/csp_bridge.dart';
 import '../core/models.dart';
 import '../core/storage_service.dart';
@@ -54,12 +57,21 @@ class _PlayerScreenState extends State<PlayerScreen>
   late bool _autoNext;
   late String _repeatMode;
 
+  bool _allowHistory = false;
   bool _controlsVisible = true;
   bool _speedBoosting = false;
   String _hudText = '';
+  String _playbackError = '';
+  bool _allowEvents = false;
+  bool _wasFullscreen = false;
+  Future<void> _mediaChanges = Future<void>.value();
+  List<CmsEpisode> _qualityChoices = const [];
+  bool get _desktop =>
+      Platform.isWindows || Platform.isMacOS || Platform.isLinux;
   BoxFit _fit = BoxFit.contain;
   Timer? _hideTimer;
   Timer? _historyTimer;
+  EmbyPlaybackSession? _embySession;
   Duration _position = Duration.zero;
   Duration _duration = Duration.zero;
   bool _playing = false;
@@ -81,6 +93,15 @@ class _PlayerScreenState extends State<PlayerScreen>
   String _videoCodec = '';
   String _audioCodec = '';
   String _activeStreamUrl = '';
+  String _activeMediaUri = '';
+  bool get _matchesActiveMedia {
+    final playlist = _player.state.playlist;
+    return _activeMediaUri.isNotEmpty &&
+        playlist.index >= 0 &&
+        playlist.index < playlist.medias.length &&
+        playlist.medias[playlist.index].uri == _activeMediaUri;
+  }
+
   bool _introSkippedForSession = false;
   bool _outroSkippedForSession = false;
 
@@ -98,10 +119,14 @@ class _PlayerScreenState extends State<PlayerScreen>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _lineIndex =
-        widget.initialLineIndex.clamp(0, widget.video.lines.length - 1);
-    _episodeIndex = widget.initialEpisodeIndex
-        .clamp(0, _currentLine.episodes.length - 1);
+    _lineIndex = widget.initialLineIndex.clamp(
+      0,
+      widget.video.lines.length - 1,
+    );
+    _episodeIndex = widget.initialEpisodeIndex.clamp(
+      0,
+      _currentLine.episodes.length - 1,
+    );
     _normalSpeed = widget.storage.playSpeed;
     _skipIntroSec = widget.storage.skipIntroSec;
     _skipOutroSec = widget.storage.skipOutroSec;
@@ -113,6 +138,8 @@ class _PlayerScreenState extends State<PlayerScreen>
       _ => BoxFit.contain,
     };
 
+    if (_desktop)
+      windowManager.isFullScreen().then((value) => _wasFullscreen = value);
     _player = Player();
     _controller = VideoController(_player);
 
@@ -125,7 +152,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       setState(() => _videoHeight = h);
     });
     _player.stream.track.listen((track) {
-      if (!mounted) return;
+      if (!mounted || !_allowEvents || !_matchesActiveMedia) return;
       final vCodec = (track.video.codec ?? track.video.decoder ?? '').trim();
       final aCodec = (track.audio.codec ?? track.audio.decoder ?? '').trim();
       if (vCodec != _videoCodec || aCodec != _audioCodec) {
@@ -137,18 +164,19 @@ class _PlayerScreenState extends State<PlayerScreen>
     });
 
     _player.stream.position.listen((pos) {
-      if (!mounted) return;
+      if (!mounted || !_allowEvents || !_matchesActiveMedia) return;
       final nextPos = (!_isDraggingSeek && !_isSliderDragging)
           ? ((_pendingResumeMs > 0 && pos.inMilliseconds < 2000)
-              ? Duration(milliseconds: _pendingResumeMs)
-              : pos)
+                ? Duration(milliseconds: _pendingResumeMs)
+                : pos)
           : _position;
       if (pos.inMilliseconds >= 1000) {
         _lastKnownPositionMs = pos.inMilliseconds;
       }
       final shouldClearLoading = pos > Duration.zero && _loading;
       final nowMs = DateTime.now().millisecondsSinceEpoch;
-      final shouldRebuildUi = shouldClearLoading ||
+      final shouldRebuildUi =
+          shouldClearLoading ||
           (_controlsVisible &&
               !_isDraggingSeek &&
               !_isSliderDragging &&
@@ -164,6 +192,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       } else {
         _position = nextPos;
       }
+      _embySession?.update(pos.inMilliseconds, !_playing);
       final effectiveDur = _duration.inMilliseconds > 0
           ? _duration
           : Duration(milliseconds: _lastKnownDurationMs);
@@ -179,14 +208,14 @@ class _PlayerScreenState extends State<PlayerScreen>
     });
 
     _player.stream.duration.listen((dur) {
-      if (!mounted) return;
+      if (!mounted || !_allowEvents || !_matchesActiveMedia) return;
       setState(() {
         if (dur.inMilliseconds > 0) {
           if (dur.inMilliseconds > _lastKnownDurationMs) {
             _lastKnownDurationMs = dur.inMilliseconds;
           }
-          _duration = (!_isLiveStream &&
-                  _lastKnownDurationMs > dur.inMilliseconds)
+          _duration =
+              (!_isLiveStream && _lastKnownDurationMs > dur.inMilliseconds)
               ? Duration(milliseconds: _lastKnownDurationMs)
               : dur;
         } else if (!_isLiveStream && _lastKnownDurationMs > 0) {
@@ -210,7 +239,9 @@ class _PlayerScreenState extends State<PlayerScreen>
             _position = Duration(milliseconds: targetMs);
           });
           _player.seek(Duration(milliseconds: targetMs));
-          _showHud('已为您续播至 ${_formatDuration(Duration(milliseconds: targetMs))}');
+          _showHud(
+            '已为您续播至 ${_formatDuration(Duration(milliseconds: targetMs))}',
+          );
           // Reinforce seek after 550ms in case an HLS stream resets to 0 on initial segment decode
           Future.delayed(const Duration(milliseconds: 550), () {
             if (!mounted || sessionAtSeek != _playSession) return;
@@ -230,7 +261,11 @@ class _PlayerScreenState extends State<PlayerScreen>
     });
 
     _player.stream.playing.listen((playing) {
-      if (mounted) {
+      if (mounted && _allowEvents && _matchesActiveMedia) {
+        if (playing && widget.site.isEmby && _embySession == null) {
+          _openCurrentEpisode(resumeMs: 0);
+          return;
+        }
         setState(() {
           _playing = playing;
           if (playing) _loading = false;
@@ -238,17 +273,32 @@ class _PlayerScreenState extends State<PlayerScreen>
         if (!playing) {
           _saveProgress();
         }
+        if (playing || _position > Duration.zero) {
+          _embySession?.update(_position.inMilliseconds, !playing, force: true);
+        }
       }
     });
 
     _player.stream.buffering.listen((buffering) {
-      if (mounted) setState(() => _buffering = buffering);
+      if (mounted && _allowEvents && _matchesActiveMedia)
+        setState(() => _buffering = buffering);
     });
 
     _player.stream.completed.listen((completed) {
-      if (completed && mounted && !_outroSkippedForSession) {
+      if (completed &&
+          mounted &&
+          _allowEvents &&
+          _matchesActiveMedia &&
+          !_outroSkippedForSession) {
+        _embySession?.stop(_position.inMilliseconds);
+        _embySession = null;
         _handleEpisodeEnd();
       }
+    });
+
+    _player.stream.error.listen((message) {
+      if (mounted && _allowEvents && _matchesActiveMedia && message.isNotEmpty)
+        _failPlayback();
     });
 
     _openCurrentEpisode(resumeMs: widget.initialPositionMs);
@@ -271,8 +321,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (widget.site.isEffectivelyPrivate) return 0;
     for (final entry in widget.storage.getWatchHistory()) {
       if (entry.site == widget.site.key && entry.id == widget.video.id) {
-        if ((entry.line == _currentLine.name &&
-                entry.index == _episodeIndex) ||
+        if ((entry.line == _currentLine.name && entry.index == _episodeIndex) ||
             entry.episode == _currentEpisode.name) {
           if (entry.duration > 0) {
             _lastKnownDurationMs = entry.duration;
@@ -287,6 +336,10 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   void _handleEpisodeEnd() {
     if (_repeatMode == 'one') {
+      if (widget.site.isEmby) {
+        _openCurrentEpisode(resumeMs: 0);
+        return;
+      }
       _player.seek(Duration.zero);
       _player.play();
       _outroSkippedForSession = false;
@@ -303,12 +356,48 @@ class _PlayerScreenState extends State<PlayerScreen>
     }
   }
 
-  Future<void> _openCurrentEpisode({int? resumeMs}) async {
+  void _failPlayback() {
+    if (!mounted) return;
+    _embySession?.stop(_position.inMilliseconds);
+    _embySession = null;
+    setState(() {
+      _allowEvents = false;
+      _allowHistory = false;
+      _loading = false;
+      _buffering = false;
+      _playing = false;
+      _controlsVisible = true;
+      _playbackError = '播放失败，请重试或切换线路';
+    });
+    _player.pause();
+  }
+
+  Future<void> _changeMedia(int session, Future<void> Function() action) {
+    final next = _mediaChanges.then((_) async {
+      if (mounted && session == _playSession) await action();
+    });
+    _mediaChanges = next.catchError((_) {});
+    return next;
+  }
+
+  Future<void> _openCurrentEpisode({int? resumeMs, CmsEpisode? quality}) async {
     final session = ++_playSession;
-    final effectiveResumeMs =
-        (resumeMs != null && resumeMs > 0)
-            ? resumeMs
-            : (resumeMs == null ? _lookupSavedResumeForCurrentEpisode() : 0);
+    if (quality == null) _qualityChoices = const [];
+    _embySession?.stop(_position.inMilliseconds);
+    _embySession = null;
+    _allowHistory = false;
+    _allowEvents = false;
+    _playbackError = '';
+    try {
+      await _changeMedia(session, () => _player.stop());
+    } catch (_) {
+      if (session == _playSession) _failPlayback();
+      return;
+    }
+    if (!mounted || session != _playSession) return;
+    final effectiveResumeMs = (resumeMs != null && resumeMs > 0)
+        ? resumeMs
+        : (resumeMs == null ? _lookupSavedResumeForCurrentEpisode() : 0);
     _pendingResumeMs = effectiveResumeMs > 0 ? effectiveResumeMs : 0;
     _lastKnownPositionMs = _pendingResumeMs;
     _lastKnownDurationMs = 0;
@@ -316,7 +405,8 @@ class _PlayerScreenState extends State<PlayerScreen>
     _introSkippedForSession = _pendingResumeMs > 0;
     _outroSkippedForSession = false;
 
-    if (!_currentEpisode.isDirectPlayable) {
+    if (!_currentEpisode.isDirectPlayable &&
+        !_currentEpisode.needsSourceResolution) {
       _pendingResumeMs = 0;
       if (mounted) {
         setState(() {
@@ -324,7 +414,8 @@ class _PlayerScreenState extends State<PlayerScreen>
           _playing = false;
           _position = Duration.zero;
           _duration = Duration.zero;
-          _hudText = '当前剧集地址需专用插件解析，无法直接播放';
+          _playbackError = '当前剧集需要专用插件解析，请切换线路';
+          _controlsVisible = true;
         });
       }
       return;
@@ -345,37 +436,59 @@ class _PlayerScreenState extends State<PlayerScreen>
       });
     }
 
-    final resolvedEpisode = _currentEpisode.isLocalFile
-        ? _currentEpisode
-        : await _client.resolveEpisodeForPlayback(
-            widget.site,
-            _currentEpisode,
-          );
-    if (!mounted || session != _playSession) return;
-    _activeStreamUrl = resolvedEpisode.url;
+    try {
+      final resolvedEpisode = quality ?? (_currentEpisode.isLocalFile
+          ? _currentEpisode
+          : await _client.resolveEpisodeForPlayback(
+              widget.site,
+              _currentEpisode,
+            ));
+      EmbyPlaybackSession? report;
+      if (widget.site.isEmby && resolvedEpisode.playbackSession.isNotEmpty) {
+        report = (await EmbyLibrary.open(widget.site)).track(resolvedEpisode);
+      }
+      if (!mounted || session != _playSession) {
+        report?.stop();
+        return;
+      }
+      _embySession = report;
+      if (quality == null) _qualityChoices = resolvedEpisode.variants;
+      _activeStreamUrl = resolvedEpisode.url;
+      _activeMediaUri = Media(resolvedEpisode.url).uri;
 
-    final headers = <String, String>{
-      ...widget.site.headers,
-      ...resolvedEpisode.headers,
-    };
-    await _player.open(
-      Media(
-        resolvedEpisode.url,
-        httpHeaders: headers,
-        start: _pendingResumeMs > 0
-            ? Duration(milliseconds: _pendingResumeMs)
-            : null,
-      ),
-      play: true,
-    );
-    if (!mounted || session != _playSession) return;
-    await _player.setRate(_normalSpeed);
-    if (!mounted || session != _playSession) return;
-    _scheduleHide();
+      final headers = <String, String>{
+        ...widget.site.headers,
+        ...resolvedEpisode.headers,
+      };
+      await _changeMedia(session, () async {
+        _allowEvents = true;
+        await _player.open(
+          Media(
+            resolvedEpisode.url,
+            httpHeaders: headers,
+            start: _pendingResumeMs > 0
+                ? Duration(milliseconds: _pendingResumeMs)
+                : null,
+          ),
+          play: true,
+        );
+        if (resolvedEpisode.externalAudioUrl.isNotEmpty) {
+          await _player.setAudioTrack(AudioTrack.uri(resolvedEpisode.externalAudioUrl));
+        }
+      });
+      if (!mounted || session != _playSession || !_allowEvents) return;
+      _allowHistory = true;
+      await _player.setRate(_normalSpeed);
+      if (!mounted || session != _playSession) return;
+      _scheduleHide();
+    } catch (_) {
+      if (mounted && session == _playSession) _failPlayback();
+    }
   }
 
   Future<void> _saveProgress() async {
-    if (_isLiveStream ||
+    if (!_allowHistory ||
+        _isLiveStream ||
         widget.site.key == 'live' ||
         widget.site.isEffectivelyPrivate) {
       return;
@@ -421,6 +534,11 @@ class _PlayerScreenState extends State<PlayerScreen>
   }
 
   Future<void> _toggleOrientation() async {
+    if (_desktop) {
+      await windowManager.setFullScreen(!await windowManager.isFullScreen());
+      _scheduleHide();
+      return;
+    }
     final size = MediaQuery.sizeOf(context);
     final currentlyLandscape = size.width > size.height;
     if (currentlyLandscape) {
@@ -450,8 +568,10 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   void _seekRelative(int seconds) {
     if (_duration.inMilliseconds <= 0) return;
-    final targetMs = (_position.inMilliseconds + seconds * 1000)
-        .clamp(0, _duration.inMilliseconds);
+    final targetMs = (_position.inMilliseconds + seconds * 1000).clamp(
+      0,
+      _duration.inMilliseconds,
+    );
     _player.seek(Duration(milliseconds: targetMs));
     _showHud(
       '${seconds >= 0 ? "快进" : "快退"} ${_formatDuration(Duration(milliseconds: targetMs))}',
@@ -500,12 +620,12 @@ class _PlayerScreenState extends State<PlayerScreen>
       final tier = (maxDim >= 3800 || minDim >= 2100)
           ? '4K '
           : (maxDim >= 2500 || minDim >= 1400)
-              ? '2K '
-              : (maxDim >= 1900 || minDim >= 1000)
-                  ? '1080P '
-                  : (maxDim >= 1200 || minDim >= 700)
-                      ? '720P '
-                      : '';
+          ? '2K '
+          : (maxDim >= 1900 || minDim >= 1000)
+          ? '1080P '
+          : (maxDim >= 1200 || minDim >= 700)
+          ? '720P '
+          : '';
       parts.add('$tier$_videoWidth × $_videoHeight');
     }
     final vc = _videoCodec.toLowerCase();
@@ -536,7 +656,8 @@ class _PlayerScreenState extends State<PlayerScreen>
         parts.add('OPUS');
       }
     }
-    final hint = '${_activeStreamUrl.split('?').first} ${_currentEpisode.name}'.toLowerCase();
+    final hint = '${_activeStreamUrl.split('?').first} ${_currentEpisode.name}'
+        .toLowerCase();
     if (hint.contains('.mkv')) {
       parts.add('MKV');
     } else if (hint.contains('.mp4')) {
@@ -557,9 +678,13 @@ class _PlayerScreenState extends State<PlayerScreen>
     _hideTimer?.cancel();
     _historyTimer?.cancel();
     _saveProgress();
+    _embySession?.stop(_position.inMilliseconds);
+    _embySession = null;
     SystemChrome.setPreferredOrientations(DeviceOrientation.values);
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
-    _player.dispose();
+    _allowEvents = false;
+    if (_desktop) windowManager.setFullScreen(_wasFullscreen);
+    _mediaChanges.whenComplete(() => _player.dispose());
     super.dispose();
   }
 
@@ -587,12 +712,35 @@ class _PlayerScreenState extends State<PlayerScreen>
             _seekRelative(-15);
             return KeyEventResult.handled;
           }
+          if (event.logicalKey == LogicalKeyboardKey.arrowUp ||
+              event.logicalKey == LogicalKeyboardKey.arrowDown) {
+            final volume =
+                (_player.state.volume +
+                        (event.logicalKey == LogicalKeyboardKey.arrowUp
+                            ? 5
+                            : -5))
+                    .clamp(0.0, 100.0);
+            _player.setVolume(volume);
+            _showHud('音量 ${volume.round()}%');
+            return KeyEventResult.handled;
+          }
           if (event.logicalKey == LogicalKeyboardKey.keyF) {
             _toggleOrientation();
             return KeyEventResult.handled;
           }
           if (event.logicalKey == LogicalKeyboardKey.escape) {
-            Navigator.of(context).maybePop();
+            if (_desktop) {
+              windowManager.isFullScreen().then((full) {
+                if (!mounted) return;
+                if (full) {
+                  windowManager.setFullScreen(false);
+                } else {
+                  Navigator.of(context).maybePop();
+                }
+              });
+            } else {
+              Navigator.of(context).maybePop();
+            }
             return KeyEventResult.handled;
           }
           return KeyEventResult.ignored;
@@ -601,6 +749,10 @@ class _PlayerScreenState extends State<PlayerScreen>
           behavior: HitTestBehavior.opaque,
           onTap: _toggleControls,
           onDoubleTap: () {
+            if (_desktop) {
+              _toggleOrientation();
+              return;
+            }
             _player.playOrPause();
             setState(() => _controlsVisible = true);
             _scheduleHide();
@@ -639,12 +791,15 @@ class _PlayerScreenState extends State<PlayerScreen>
             }
             final width = MediaQuery.sizeOf(context).width.clamp(200.0, 4000.0);
             final dx = details.localPosition.dx - _dragStartX;
-            final spanMs =
-                (_duration.inMilliseconds / 5.0).clamp(60000.0, 300000.0);
+            final spanMs = (_duration.inMilliseconds / 5.0).clamp(
+              60000.0,
+              300000.0,
+            );
             final deltaMs = (dx / width) * spanMs;
-            final previewMs = (_dragStartPosMs + deltaMs)
-                .round()
-                .clamp(0, _duration.inMilliseconds);
+            final previewMs = (_dragStartPosMs + deltaMs).round().clamp(
+              0,
+              _duration.inMilliseconds,
+            );
             setState(() {
               _dragTargetPosMs = previewMs;
               _hudText =
@@ -653,7 +808,10 @@ class _PlayerScreenState extends State<PlayerScreen>
           },
           onHorizontalDragEnd: (_) {
             if (_isLiveStream || !_isDraggingSeek) return;
-            final targetMs = _dragTargetPosMs.clamp(0, _duration.inMilliseconds);
+            final targetMs = _dragTargetPosMs.clamp(
+              0,
+              _duration.inMilliseconds,
+            );
             setState(() {
               _isDraggingSeek = false;
               _position = Duration(milliseconds: targetMs);
@@ -701,6 +859,23 @@ class _PlayerScreenState extends State<PlayerScreen>
                   ),
                 ),
               if (_controlsVisible) _buildAppleChromeOverlay(context),
+              if (_playbackError.isNotEmpty)
+                Center(
+                  child: AppleGlassSurface(
+                    padding: const EdgeInsets.all(20),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(_playbackError, textAlign: TextAlign.center),
+                        const SizedBox(height: 12),
+                        TextButton(
+                          onPressed: () => _openCurrentEpisode(),
+                          child: const Text('重试播放'),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
               if (_loading || _buffering)
                 Center(
                   child: AppleGlassSurface(
@@ -737,10 +912,10 @@ class _PlayerScreenState extends State<PlayerScreen>
     final size = MediaQuery.sizeOf(context);
     final isLandscape = size.width > size.height;
     final safePad = MediaQuery.paddingOf(context);
-    final leftInset =
-        isLandscape ? math.max(16.0, safePad.left * 0.45) : 14.0;
-    final rightDockEdge =
-        isLandscape ? math.max(8.0, safePad.right * 0.16) : 14.0;
+    final leftInset = isLandscape ? math.max(16.0, safePad.left * 0.45) : 14.0;
+    final rightDockEdge = isLandscape
+        ? math.max(8.0, safePad.right * 0.16)
+        : 14.0;
 
     return Container(
       decoration: const BoxDecoration(
@@ -1063,10 +1238,12 @@ class _PlayerScreenState extends State<PlayerScreen>
     final activePosMs = _isDraggingSeek
         ? _dragTargetPosMs.toDouble()
         : (_isSliderDragging
-            ? _sliderDragPosMs
-            : _position.inMilliseconds.toDouble());
+              ? _sliderDragPosMs
+              : _position.inMilliseconds.toDouble());
     final curMs = hasDuration ? activePosMs.clamp(0.0, maxMs) : 0.0;
-    final activeDuration = Duration(milliseconds: activePosMs.clamp(0.0, 86400000.0).round());
+    final activeDuration = Duration(
+      milliseconds: activePosMs.clamp(0.0, 86400000.0).round(),
+    );
     final totalDuration = Duration(milliseconds: effectiveDurationMs);
 
     return ConstrainedBox(
@@ -1152,11 +1329,17 @@ class _PlayerScreenState extends State<PlayerScreen>
               minSize: 34,
               onPressed: _toggleOrientation,
               child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 10,
+                  vertical: 6,
+                ),
                 decoration: BoxDecoration(
                   color: const Color(0x28FFFFFF),
                   borderRadius: BorderRadius.circular(999),
-                  border: Border.all(color: AppleColors.glassBorder, width: 0.5),
+                  border: Border.all(
+                    color: AppleColors.glassBorder,
+                    width: 0.5,
+                  ),
                 ),
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
@@ -1215,11 +1398,7 @@ class _PlayerScreenState extends State<PlayerScreen>
           _showEpisodesSheet,
         ),
       if (widget.video.lines.length > 1 || !live)
-        _PlayerAction(
-          CupertinoIcons.layers_alt_fill,
-          '线路',
-          _showLinesSheet,
-        ),
+        _PlayerAction(CupertinoIcons.layers_alt_fill, '线路', _showLinesSheet),
       if (!live)
         _PlayerAction(
           CupertinoIcons.speedometer,
@@ -1263,31 +1442,25 @@ class _PlayerScreenState extends State<PlayerScreen>
           active: _repeatMode == 'one' || _repeatMode == 'all',
         ),
       ],
-      _PlayerAction(
-        CupertinoIcons.speaker_2_fill,
-        '音轨',
-        _showAudioTracksSheet,
-      ),
+      if (_qualityChoices.length > 1)
+        _PlayerAction(CupertinoIcons.slider_horizontal_3, '画质', _showQualityChoices),
+      _PlayerAction(CupertinoIcons.speaker_2_fill, '音轨', _showAudioTracksSheet),
       if (!live)
         _PlayerAction(
           CupertinoIcons.captions_bubble_fill,
           '字幕',
           _showSubtitleTracksSheet,
         ),
-      _PlayerAction(
-        CupertinoIcons.refresh,
-        live ? '刷新' : '重播',
-        () {
-          if (live) {
-            _openCurrentEpisode();
-            _showHud('正在刷新直播流…');
-          } else {
-            _player.seek(Duration.zero);
-            _player.play();
-            _showHud('已从头开始播放');
-          }
-        },
-      ),
+      _PlayerAction(CupertinoIcons.refresh, live ? '刷新' : '重播', () {
+        if (live) {
+          _openCurrentEpisode();
+          _showHud('正在刷新直播流…');
+        } else {
+          _player.seek(Duration.zero);
+          _player.play();
+          _showHud('已从头开始播放');
+        }
+      }),
     ];
 
     if (isLandscape) {
@@ -1353,7 +1526,9 @@ class _PlayerScreenState extends State<PlayerScreen>
   /// Landscape rail button: icon in a soft circular glass well with a short
   /// caption underneath; active toggles take the system tint.
   Widget _buildRailButton(_PlayerAction action) {
-    final tint = action.active ? const Color(0xFF3E9BFF) : AppleColors.labelPrimary;
+    final tint = action.active
+        ? const Color(0xFF3E9BFF)
+        : AppleColors.labelPrimary;
     return CupertinoButton(
       padding: EdgeInsets.zero,
       minSize: 44,
@@ -1396,7 +1571,9 @@ class _PlayerScreenState extends State<PlayerScreen>
   }
 
   Widget _buildToolTile(_PlayerAction action) {
-    final tint = action.active ? const Color(0xFF3E9BFF) : AppleColors.labelPrimary;
+    final tint = action.active
+        ? const Color(0xFF3E9BFF)
+        : AppleColors.labelPrimary;
     return CupertinoButton(
       padding: EdgeInsets.zero,
       minSize: 34,
@@ -1500,9 +1677,9 @@ class _PlayerScreenState extends State<PlayerScreen>
           final currentPlaySec = isIntro
               ? _position.inSeconds.clamp(0, 300)
               : ((_duration.inMilliseconds > 0
-                          ? (_duration - _position).inSeconds
-                          : _position.inSeconds)
-                      .clamp(0, 300));
+                        ? (_duration - _position).inSeconds
+                        : _position.inSeconds)
+                    .clamp(0, 300));
           return SingleChildScrollView(
             padding: const EdgeInsets.fromLTRB(16, 12, 16, 20),
             child: Column(
@@ -1526,7 +1703,9 @@ class _PlayerScreenState extends State<PlayerScreen>
                             ),
                           ),
                           Text(
-                            tempSec == 0 ? '不跳过 (00:00)' : '$formatted ($tempSec秒)',
+                            tempSec == 0
+                                ? '不跳过 (00:00)'
+                                : '$formatted ($tempSec秒)',
                             style: const TextStyle(
                               color: AppleColors.systemBlue,
                               fontSize: 15,
@@ -1558,9 +1737,13 @@ class _PlayerScreenState extends State<PlayerScreen>
                           for (final step in const [-10, -5, -1, 1, 5, 10]) ...[
                             Expanded(
                               child: Padding(
-                                padding: const EdgeInsets.symmetric(horizontal: 2.5),
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 2.5,
+                                ),
                                 child: CupertinoButton(
-                                  padding: const EdgeInsets.symmetric(vertical: 7),
+                                  padding: const EdgeInsets.symmetric(
+                                    vertical: 7,
+                                  ),
                                   minSize: 32,
                                   color: const Color(0x28FFFFFF),
                                   borderRadius: BorderRadius.circular(10),
@@ -1641,8 +1824,9 @@ class _PlayerScreenState extends State<PlayerScreen>
                           style: TextStyle(
                             color: Colors.white,
                             fontSize: 12,
-                            fontWeight:
-                                selected ? FontWeight.w700 : FontWeight.w500,
+                            fontWeight: selected
+                                ? FontWeight.w700
+                                : FontWeight.w500,
                           ),
                         ),
                       ),
@@ -1655,6 +1839,22 @@ class _PlayerScreenState extends State<PlayerScreen>
         },
       ),
     );
+  }
+
+  Future<void> _showQualityChoices() async {
+    final session = _playSession;
+    final selected = await showCupertinoModalPopup<CmsEpisode>(
+      context:context,
+      builder:(sheet)=>CupertinoActionSheet(
+        title:const Text('切换画质'),
+        actions:[for(final choice in _qualityChoices) CupertinoActionSheetAction(
+          isDefaultAction:choice.url == _activeStreamUrl,
+          onPressed:()=>Navigator.pop(sheet,choice),child:Text(choice.name))],
+        cancelButton:CupertinoActionSheetAction(onPressed:()=>Navigator.pop(sheet),child:const Text('取消')),
+      ),
+    );
+    if(!mounted || session != _playSession || selected == null || selected.url == _activeStreamUrl) return;
+    await _openCurrentEpisode(resumeMs:_position.inMilliseconds,quality:selected);
   }
 
   void _showAudioTracksSheet() {
@@ -1852,9 +2052,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     showAppleModalSheet<void>(
       context: context,
       title: '选集与线路 (${_currentLine.episodes.length})',
-      maxWidth: isLandscape
-          ? math.min(screenSize.width - 24, 760.0)
-          : 560.0,
+      maxWidth: isLandscape ? math.min(screenSize.width - 24, 760.0) : 560.0,
       builder: (ctx) => _PlayerEpisodePickerSheet(
         lines: widget.video.lines,
         initialLineIndex: _lineIndex,
@@ -1865,8 +2063,8 @@ class _PlayerScreenState extends State<PlayerScreen>
           final sameEpisode = epIdx == _episodeIndex;
           final keepPos = sameEpisode
               ? (_position.inMilliseconds >= 1000
-                  ? _position.inMilliseconds
-                  : _lastKnownPositionMs)
+                    ? _position.inMilliseconds
+                    : _lastKnownPositionMs)
               : 0;
           _saveProgress();
           setState(() {
@@ -1885,8 +2083,10 @@ class _PlayerAction {
   final IconData icon;
   final String label;
   final VoidCallback onTap;
+
   /// Compact caption for the narrow landscape rail.
   final String? shortLabel;
+
   /// Highlights toggles that are currently on (连播、循环、跳片头…).
   final bool active;
   const _PlayerAction(
@@ -1902,10 +2102,7 @@ class _ParsedEpisodeLabel {
   final String title;
   final String sizeBadge;
 
-  const _ParsedEpisodeLabel({
-    required this.title,
-    required this.sizeBadge,
-  });
+  const _ParsedEpisodeLabel({required this.title, required this.sizeBadge});
 
   factory _ParsedEpisodeLabel.parse(String raw, int index) {
     var text = raw.trim();
@@ -1959,22 +2156,20 @@ class _PlayerEpisodePickerSheetState extends State<_PlayerEpisodePickerSheet> {
 
   CmsLine get _line => widget.lines.isEmpty
       ? const CmsLine(name: '默认线路', episodes: [])
-      : widget.lines[
-          _previewLineIndex.clamp(0, widget.lines.length - 1).toInt()];
+      : widget.lines[_previewLineIndex
+            .clamp(0, widget.lines.length - 1)
+            .toInt()];
 
   @override
   Widget build(BuildContext context) {
     final episodes = _line.episodes;
     final total = episodes.length;
     final groupCount = total <= 0 ? 1 : ((total - 1) ~/ _groupSize) + 1;
-    final safeGroup =
-        _groupIndex.clamp(0, math.max(0, groupCount - 1)).toInt();
+    final safeGroup = _groupIndex.clamp(0, math.max(0, groupCount - 1)).toInt();
     final int startIdx = safeGroup * _groupSize;
     final int endIdx = math.min(startIdx + _groupSize, total);
 
-    final indices = <int>[
-      for (int i = startIdx; i < endIdx; i++) i,
-    ];
+    final indices = <int>[for (int i = startIdx; i < endIdx; i++) i];
     if (_descending) {
       indices.sort((a, b) => b.compareTo(a));
     }
@@ -2010,7 +2205,7 @@ class _PlayerEpisodePickerSheetState extends State<_PlayerEpisodePickerSheet> {
                               final newGroupCount = line.episodes.isEmpty
                                   ? 1
                                   : ((line.episodes.length - 1) ~/ _groupSize) +
-                                      1;
+                                        1;
                               if (_groupIndex >= newGroupCount) {
                                 _groupIndex = 0;
                               }
@@ -2164,8 +2359,9 @@ class _PlayerEpisodePickerSheetState extends State<_PlayerEpisodePickerSheet> {
                                 ? const Color(0xFF64B5FF)
                                 : AppleColors.labelSecondary,
                             fontSize: 12,
-                            fontWeight:
-                                active ? FontWeight.w700 : FontWeight.w500,
+                            fontWeight: active
+                                ? FontWeight.w700
+                                : FontWeight.w500,
                           ),
                         ),
                       ),
@@ -2179,143 +2375,139 @@ class _PlayerEpisodePickerSheetState extends State<_PlayerEpisodePickerSheet> {
           // 剧集网格卡片
           Flexible(
             child: ConstrainedBox(
-            constraints: BoxConstraints(
-              maxHeight: isLandscape
-                  ? math.min(screenSize.height * 0.6, 300.0)
-                  : math.min(screenSize.height * 0.52, 420.0),
-            ),
-            child: GridView.builder(
-              shrinkWrap: true,
-              physics: const BouncingScrollPhysics(),
-              gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                crossAxisCount: crossAxisCount,
-                mainAxisSpacing: 8,
-                crossAxisSpacing: 8,
-                mainAxisExtent: 52,
+              constraints: BoxConstraints(
+                maxHeight: isLandscape
+                    ? math.min(screenSize.height * 0.6, 300.0)
+                    : math.min(screenSize.height * 0.52, 420.0),
               ),
-              itemCount: indices.length,
-              itemBuilder: (ctx, idx) {
-                final epIndex = indices[idx];
-                final ep = episodes[epIndex];
-                final selected = _previewLineIndex == widget.activeLineIndex &&
-                    epIndex == widget.activeEpisodeIndex;
-                final parsed = _ParsedEpisodeLabel.parse(ep.name, epIndex);
-                final numBadge =
-                    '#${(epIndex + 1).toString().padLeft(2, '0')}';
+              child: GridView.builder(
+                shrinkWrap: true,
+                physics: const BouncingScrollPhysics(),
+                gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                  crossAxisCount: crossAxisCount,
+                  mainAxisSpacing: 8,
+                  crossAxisSpacing: 8,
+                  mainAxisExtent: 52,
+                ),
+                itemCount: indices.length,
+                itemBuilder: (ctx, idx) {
+                  final epIndex = indices[idx];
+                  final ep = episodes[epIndex];
+                  final selected =
+                      _previewLineIndex == widget.activeLineIndex &&
+                      epIndex == widget.activeEpisodeIndex;
+                  final parsed = _ParsedEpisodeLabel.parse(ep.name, epIndex);
+                  final numBadge =
+                      '#${(epIndex + 1).toString().padLeft(2, '0')}';
 
-                return GestureDetector(
-                  onTap: () => widget.onSelect(_previewLineIndex, epIndex),
-                  child: AnimatedContainer(
-                    duration: const Duration(milliseconds: 180),
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 11,
-                      vertical: 7,
-                    ),
-                    decoration: BoxDecoration(
-                      gradient: selected
-                          ? const LinearGradient(
-                              begin: Alignment.topLeft,
-                              end: Alignment.bottomRight,
-                              colors: [
-                                Color(0xFF1D8BFF),
-                                Color(0xFF0A6CE8),
-                              ],
-                            )
-                          : const LinearGradient(
-                              begin: Alignment.topLeft,
-                              end: Alignment.bottomRight,
-                              colors: [
-                                Color(0xCC28282F),
-                                Color(0xB81D1D23),
-                              ],
-                            ),
-                      borderRadius: BorderRadius.circular(14),
-                      border: Border.all(
-                        color: selected
-                            ? const Color(0xAAFFFFFF)
-                            : const Color(0x28FFFFFF),
-                        width: selected ? 0.9 : 0.65,
+                  return GestureDetector(
+                    onTap: () => widget.onSelect(_previewLineIndex, epIndex),
+                    child: AnimatedContainer(
+                      duration: const Duration(milliseconds: 180),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 11,
+                        vertical: 7,
                       ),
-                      boxShadow: selected
-                          ? const [
-                              BoxShadow(
-                                color: Color(0x450A84FF),
-                                blurRadius: 12,
-                                offset: Offset(0, 4),
+                      decoration: BoxDecoration(
+                        gradient: selected
+                            ? const LinearGradient(
+                                begin: Alignment.topLeft,
+                                end: Alignment.bottomRight,
+                                colors: [Color(0xFF1D8BFF), Color(0xFF0A6CE8)],
+                              )
+                            : const LinearGradient(
+                                begin: Alignment.topLeft,
+                                end: Alignment.bottomRight,
+                                colors: [Color(0xCC28282F), Color(0xB81D1D23)],
                               ),
-                            ]
-                          : null,
-                    ),
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Row(
-                          children: [
-                            if (selected) ...[
-                              const Icon(
-                                CupertinoIcons.play_fill,
-                                size: 11,
-                                color: Colors.white,
-                              ),
-                              const SizedBox(width: 4),
-                            ],
-                            Text(
-                              numBadge,
-                              style: TextStyle(
-                                color: selected
-                                    ? const Color(0xE6FFFFFF)
-                                    : AppleColors.labelTertiary,
-                                fontSize: 10.5,
-                                fontWeight: FontWeight.w700,
-                              ),
-                            ),
-                            const Spacer(),
-                            if (parsed.sizeBadge.isNotEmpty)
-                              Container(
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 5.5,
-                                  vertical: 1.5,
+                        borderRadius: BorderRadius.circular(14),
+                        border: Border.all(
+                          color: selected
+                              ? const Color(0xAAFFFFFF)
+                              : const Color(0x28FFFFFF),
+                          width: selected ? 0.9 : 0.65,
+                        ),
+                        boxShadow: selected
+                            ? const [
+                                BoxShadow(
+                                  color: Color(0x450A84FF),
+                                  blurRadius: 12,
+                                  offset: Offset(0, 4),
                                 ),
-                                decoration: BoxDecoration(
+                              ]
+                            : null,
+                      ),
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            children: [
+                              if (selected) ...[
+                                const Icon(
+                                  CupertinoIcons.play_fill,
+                                  size: 11,
+                                  color: Colors.white,
+                                ),
+                                const SizedBox(width: 4),
+                              ],
+                              Text(
+                                numBadge,
+                                style: TextStyle(
                                   color: selected
-                                      ? const Color(0x33FFFFFF)
-                                      : const Color(0x22FFFFFF),
-                                  borderRadius: BorderRadius.circular(5),
+                                      ? const Color(0xE6FFFFFF)
+                                      : AppleColors.labelTertiary,
+                                  fontSize: 10.5,
+                                  fontWeight: FontWeight.w700,
                                 ),
-                                child: Text(
-                                  parsed.sizeBadge,
-                                  style: TextStyle(
+                              ),
+                              const Spacer(),
+                              if (parsed.sizeBadge.isNotEmpty)
+                                Container(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 5.5,
+                                    vertical: 1.5,
+                                  ),
+                                  decoration: BoxDecoration(
                                     color: selected
-                                        ? Colors.white
-                                        : AppleColors.labelSecondary,
-                                    fontSize: 9.5,
-                                    fontWeight: FontWeight.w600,
+                                        ? const Color(0x33FFFFFF)
+                                        : const Color(0x22FFFFFF),
+                                    borderRadius: BorderRadius.circular(5),
+                                  ),
+                                  child: Text(
+                                    parsed.sizeBadge,
+                                    style: TextStyle(
+                                      color: selected
+                                          ? Colors.white
+                                          : AppleColors.labelSecondary,
+                                      fontSize: 9.5,
+                                      fontWeight: FontWeight.w600,
+                                    ),
                                   ),
                                 ),
-                              ),
-                          ],
-                        ),
-                        const SizedBox(height: 3),
-                        Text(
-                          parsed.title,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            color: Colors.white,
-                            fontSize: 12.5,
-                            fontWeight:
-                                selected ? FontWeight.w700 : FontWeight.w600,
-                            letterSpacing: -0.2,
+                            ],
                           ),
-                        ),
-                      ],
+                          const SizedBox(height: 3),
+                          Text(
+                            parsed.title,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 12.5,
+                              fontWeight: selected
+                                  ? FontWeight.w700
+                                  : FontWeight.w600,
+                              letterSpacing: -0.2,
+                            ),
+                          ),
+                        ],
+                      ),
                     ),
-                  ),
-                );
-              },
+                  );
+                },
+              ),
             ),
-          ),
           ),
         ],
       ),

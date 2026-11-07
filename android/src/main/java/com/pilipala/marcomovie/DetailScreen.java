@@ -191,8 +191,11 @@ final class DetailScreen {
                                             a.resolvePlayer(
                                                     s,
                                                     v,
-                                                    v.lines.get(0),
-                                                    v.lines.get(0).episodes.get(0));
+                                                    v.lines.get(SourcePreferences.lineIndex(a, v)),
+                                                    v.lines
+                                                            .get(SourcePreferences.lineIndex(a, v))
+                                                            .episodes
+                                                            .get(0));
                                     });
                     LinearLayout actions = a.row();
                     info.removeView(favorite);
@@ -209,7 +212,7 @@ final class DetailScreen {
                         last.setPadding(0, a.dp(12), 0, 0);
                         info.addView(last);
                     }
-                    int rememberedLine = 0, rememberedPage = 0;
+                    int rememberedLine = SourcePreferences.lineIndex(a, v), rememberedPage = 0;
                     if (remembered != null)
                         for (int i = 0; i < v.lines.size(); i++)
                             if (v.lines.get(i).name.equals(remembered.line)) {
@@ -283,6 +286,9 @@ final class DetailScreen {
                     video.lines.get(lineIndex).episodes.size());
         panel.removeAllViews();
         Cms.Line line = video.lines.get(lineIndex);
+        panel.addView(
+                a.navButton(
+                        "默认播放线路", "line-preferred", () -> SourcePreferences.chooseLine(a, video)));
         final boolean descending = a.prefs.getBoolean(Prefs.EPISODES_DESCENDING, false);
         CategoryFlow sources = new CategoryFlow(a, () -> {});
         sources.setTag("detail-line-buttons");

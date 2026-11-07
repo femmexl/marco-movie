@@ -154,7 +154,10 @@ def sync(output):
     release = choose(json.loads(fetch(f'https://api.github.com/repos/{REPO}/releases?per_page=100', 4 * 1024 * 1024)))
     version = release['tag_name'][1:-8]
     apk_name, source_name = f'MarcoMovie-{version}-preview.apk', f'MarcoMovie-{version}-source.zip'
-    apk, sha = asset(release, apk_name, output)
+    # Always download and validate the TV APK identity, even when Pages cannot
+    # store its bytes. The channel then points at the verified official asset.
+    apk, sha = asset(release, apk_name, output, limit=PLATFORM_LIMIT)
+    apk_href = apk_name if len(apk) <= LIMIT else f'https://github.com/{REPO}/releases/download/{release["tag_name"]}/{apk_name}'
     source, source_sha = asset(release, source_name, output)
     platforms = []
     for pattern, label, note in PLATFORMS:
@@ -171,15 +174,24 @@ def sync(output):
         license_text = archive.read(f'MarcoMovie-{version}/LICENSE')
         notice = archive.read(f'MarcoMovie-{version}/NOTICE')
     feed = dict(schema=1, versionCode=identity['versionCode'], versionName=version, minSdk=identity['minSdk'],
-                size=len(apk), sha256=sha, url=BASE + apk_name, prerelease=True, notes=(release.get('body') or '')[:8000])
+                size=len(apk), sha256=sha, url=apk_href if apk_href.startswith('https://') else BASE + apk_name,
+                prerelease=bool(release.get('prerelease',True)), notes=(release.get('body') or '')[:8000])
+    for name, _, _, href, size, digest, _ in platforms:
+        if name == f'MarcoMovie-{version}-mobile.apk':
+            feed['mobile'] = dict(size=size, sha256=digest, url=href if href.startswith('https://') else BASE + name)
+        if name == f'MarcoMovie-{version}-windows-setup.exe':
+            feed['windows'] = dict(size=size, sha256=digest, url=href if href.startswith('https://') else BASE + name)
     feed_path = output / 'updates/preview.json'
-    if feed_path.exists():
-        previous = json.loads(feed_path.read_text(encoding='utf-8'))
-        if previous['versionCode'] > feed['versionCode']:
-            raise ValueError('Refusing to roll the mirror back')
-        if previous['versionCode'] == feed['versionCode'] and previous['sha256'] != sha:
-            raise ValueError('Refusing to replace a published version')
+    feed_paths = [feed_path] + ([] if feed['prerelease'] else [output/'updates/stable.json'])
+    for channel in feed_paths:
+        if channel.exists():
+            previous = json.loads(channel.read_text(encoding='utf-8'))
+            if previous['versionCode'] > feed['versionCode']:
+                raise ValueError('Refusing to roll the mirror back')
+            if previous['versionCode'] == feed['versionCode'] and previous['sha256'] != sha:
+                raise ValueError('Refusing to replace a published version')
     escaped = html.escape
+    mobile_href = next((p[3] for p in platforms if p[0] == f'MarcoMovie-{version}-mobile.apk'), '')
     platform_card = ''
     if platforms:
         rows = ''.join(
@@ -193,8 +205,8 @@ def sync(output):
 <title>Marco Movie · 多端自适应播放器 · Pilipala</title><style>body{{margin:0;background:#101013;color:#f5f5f7;font:16px/1.8 system-ui,sans-serif}}main{{max-width:920px;margin:auto;padding:56px 24px}}h1{{font-size:48px;letter-spacing:-2px;margin:10px 0 8px}}h2{{margin-top:0}}h3{{margin:0 0 8px;color:#fff}}.muted{{color:#a1a1aa}}.card{{background:#232329;border:1px solid #37373f;border-radius:28px;padding:28px;margin:24px 0}}.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:16px;margin:24px 0}}.box{{background:#1a1b22;border:1px solid #31333d;border-radius:22px;padding:22px}}a{{color:#9ac6ff}}.button{{display:inline-block;background:#f5f5f7;color:#111;padding:12px 24px;border-radius:18px;text-decoration:none;font-weight:600;margin:6px 12px 6px 0}}.button-ghost{{display:inline-block;border:1px solid #52525b;color:#f5f5f7;padding:11px 22px;border-radius:18px;text-decoration:none;margin:6px 12px 6px 0}}pre{{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;margin:0}}code{{overflow-wrap:anywhere}}</style>
 <main><p class="muted">PILIPALA · ANDROID 电视 / 手机 / 平板 · WINDOWS · APPLE</p><h1>Marco Movie</h1><p>支持 Android 电视大屏遥控、手机与平板 64 位专属触控，以及 Windows / macOS / iOS (iOS 14.0+ 巨魔与自签) 多端独立适配的开源播放器。</p>
 <div class="card"><h2>{version}</h2><p>Android 6.0+ 电视 / 盒子 / 投影仪大屏专享版 · ARM 32 位（内置 FFmpeg / AV1 / VP9 扩展）· {len(apk)/1024/1024:.1f} MB</p>
-<a class="button" href="{apk_name}">下载 Android 电视版</a>{f'<a class="button" href="MarcoMovie-{version}-mobile.apk">下载 Android 手机版 (64位)</a>' if any(p[0] == f'MarcoMovie-{version}-mobile.apk' for p in platforms) else ''}<a class="button-ghost" href="{source_name}">下载同版本源码</a>{'' if any(p[0].endswith(('.zip', '.ipa')) for p in platforms) else f'<a class="button-ghost" href="https://github.com/{REPO}/releases/tag/{release['tag_name']}">Windows / macOS / iOS 多平台下载</a>'}
-<p><a href="{apk_name}.sha256">校验文件</a> · <a href="https://github.com/{REPO}/releases/tag/{release['tag_name']}">GitHub 发布页</a> · <a href="https://github.com/{REPO}/blob/main/docs/USER_GUIDE.md">使用指南</a></p>
+<a class="button" href="{escaped(apk_href)}">下载 Android 电视版</a>{f'<a class="button" href="{escaped(mobile_href)}">下载 Android 手机版 (64位)</a>' if mobile_href else ''}<a class="button-ghost" href="{source_name}">下载同版本源码</a>{'' if any(p[0].endswith(('.zip', '.ipa')) for p in platforms) else f'<a class="button-ghost" href="https://github.com/{REPO}/releases/tag/{release['tag_name']}">Windows / macOS / iOS 多平台下载</a>'}
+<p><a href="{escaped(apk_href)}.sha256">校验文件</a> · <a href="https://github.com/{REPO}/releases/tag/{release['tag_name']}">GitHub 发布页</a> · <a href="https://github.com/{REPO}/blob/main/docs/USER_GUIDE.md">使用指南</a></p>
 <p class="muted">SHA-256<br><code>{sha}</code></p></div>
 {platform_card}<div class="grid">
 <div class="box"><h3>📺 Android 电视端</h3><p class="muted">专为遥控器与 10 英尺大屏打造：5–8 列 2:3 海报墙、右侧悬浮图标 Dock、内置遥控全拼/首拼搜索、左固定海报 + 右独立滚动选集、小屏返回续播、局域网扫码导入配置。</p></div>
@@ -204,9 +216,11 @@ def sync(output):
 <div class="card"><h2>本次更新</h2><pre>{escaped(feed['notes'])}</pre></div>
 <p>本产品仅为工具，不内置、不提供、不托管任何影视资源或配置地址。内容与配置请自行合法获取。</p>
 <p>作者：Pilipala · <a href="LICENSE">GPL-3.0-only</a> · <a href="NOTICE">署名与许可</a> · <a href="/">Marco TV</a></p></main></html>'''
-    files = {apk_name: apk, apk_name + '.sha256': (sha + '  ' + apk_name + '\n').encode(),
+    files = {apk_name + '.sha256': (sha + '  ' + apk_name + '\n').encode(),
              source_name: source, source_name + '.sha256': (source_sha + '  ' + source_name + '\n').encode(),
              'LICENSE': license_text, 'NOTICE': notice, 'index.html': page.encode()}
+    if len(apk) <= LIMIT:
+        files[apk_name] = apk
     for name, _, _, _, _, digest, body in platforms:
         if body is None:
             continue
@@ -220,9 +234,10 @@ def sync(output):
             raise ValueError('Immutable asset already differs')
         target.write_bytes(data)
     feed_path.parent.mkdir(exist_ok=True)
-    temporary = feed_path.with_suffix('.tmp')
-    temporary.write_text(json.dumps(feed, ensure_ascii=False, indent=2) + '\n', encoding='utf-8', newline='\n')
-    temporary.replace(feed_path)
+    for channel in feed_paths:
+        temporary = channel.with_suffix('.tmp')
+        temporary.write_text(json.dumps(feed, ensure_ascii=False, indent=2) + '\n', encoding='utf-8', newline='\n')
+        temporary.replace(channel)
     print(f'Synced {version}: {len(apk)} bytes, SHA-256 {sha}; deployment must be verified separately.')
     return feed
 

@@ -42,7 +42,7 @@ final class PlayerChrome {
             topActions.setPadding(0, 0, 0, a.dp(8));
             Button backBtn = a.navButton("‹ 返回", "player-back", a::leavePlayback);
             backBtn.setTextColor(MainActivity.WHITE);
-            backBtn.setBackground(a.bg(0x44000000, 16));
+            a.glass(backBtn, 16);
             topActions.addView(backBtn, new LinearLayout.LayoutParams(-2, a.dp(34)));
             View spacer = new View(a);
             topActions.addView(spacer, new LinearLayout.LayoutParams(0, 1, 1));
@@ -65,9 +65,7 @@ final class PlayerChrome {
         resolution.setSingleLine();
         resolution.setEllipsize(android.text.TextUtils.TruncateAt.END);
         resolution.setPadding(a.dp(9), a.dp(3), a.dp(9), a.dp(3));
-        GradientDrawable specPill = a.bg(0x661a2421, 10);
-        specPill.setStroke(a.dp(1), 0x38ffffff);
-        resolution.setBackground(specPill);
+        a.glass(resolution, 10);
         titleRow.addView(resolution, new LinearLayout.LayoutParams(-2, -2));
         heading.addView(titleRow, new LinearLayout.LayoutParams(-1, -2));
         String line = a.activeLine == null ? "" : a.activeLine.name;
@@ -104,7 +102,7 @@ final class PlayerChrome {
             fsBtn.setMinHeight(a.dp(30));
             fsBtn.setMinimumHeight(a.dp(30));
             fsBtn.setPadding(a.dp(12), a.dp(4), a.dp(12), a.dp(4));
-            fsBtn.setBackground(a.bg(0x44ffffff, 15));
+            a.glass(fsBtn, 15);
             clockRow.addView(fsBtn, new LinearLayout.LayoutParams(-2, a.dp(30)));
         } else {
             fsBtn = null;
@@ -130,9 +128,7 @@ final class PlayerChrome {
         dock.setPadding(
                 a.dp(mobileLandscape ? 4 : 6), a.dp(5), a.dp(mobileLandscape ? 4 : 6), a.dp(5));
         dock.setClipChildren(false);
-        GradientDrawable glass = a.bg(0xed262629, 26);
-        glass.setStroke(a.dp(1), 0x30ffffff);
-        dock.setBackground(glass);
+        a.glass(dock, 26);
         UiCompat.setElevation(dock, a.dp(10));
         FrameLayout.LayoutParams bottom =
                 mobileLandscape
@@ -183,9 +179,7 @@ final class PlayerChrome {
         loadingPill.setTag("player-loading");
         loadingPill.setGravity(Gravity.CENTER_VERTICAL);
         loadingPill.setPadding(a.dp(24), a.dp(16), a.dp(24), a.dp(16));
-        GradientDrawable loadingBg = a.bg(0xf022232a, 24);
-        loadingBg.setStroke(a.dp(1), 0x26ffffff);
-        loadingPill.setBackground(loadingBg);
+        a.glass(loadingPill, 24);
         UiCompat.setElevation(loadingPill, a.dp(10));
         loadingPill.addView(
                 new PlaybackLoading.Ring(a), new LinearLayout.LayoutParams(a.dp(26), a.dp(26)));

@@ -28,9 +28,7 @@ final class HomeDock {
                 a.dp(bottomMode ? 6 : 8),
                 a.dp(bottomMode ? 10 : 6),
                 a.dp(bottomMode ? 6 : 8));
-        android.graphics.drawable.GradientDrawable background = a.bg(0xee242429, 25);
-        background.setStroke(a.dp(1), 0x16ffffff);
-        rail.setBackground(background);
+        a.glass(rail, 25);
         rail.setElevation(a.dp(8));
         FrameLayout.LayoutParams size =
                 bottomMode
@@ -47,6 +45,7 @@ final class HomeDock {
         hint.setIncludeFontPadding(false);
         hint.setPadding(a.dp(12), 0, a.dp(16), 0);
         hint.setBackground(new LabelBubble());
+        hint.setElevation(rail.getElevation() + a.dp(1));
         hint.setVisibility(View.INVISIBLE);
         FrameLayout.LayoutParams tip =
                 new FrameLayout.LayoutParams(-2, a.dp(28), Gravity.RIGHT | Gravity.TOP);
@@ -152,10 +151,28 @@ final class HomeDock {
                 () -> {
                     if (!items[index].hasFocus()) return;
                     FrameLayout.LayoutParams p = (FrameLayout.LayoutParams) hint.getLayoutParams();
-                    p.topMargin =
-                            rail.getTop()
-                                    + items[index].getTop()
-                                    + (items[index].getHeight() - a.dp(28)) / 2;
+                    if (bottomMode) {
+                        hint.measure(View.MeasureSpec.UNSPECIFIED, View.MeasureSpec.UNSPECIFIED);
+                        p.gravity = Gravity.LEFT | Gravity.TOP;
+                        p.rightMargin = 0;
+                        int center =
+                                rail.getLeft()
+                                        + items[index].getLeft()
+                                        + items[index].getWidth() / 2;
+                        p.leftMargin =
+                                Math.max(
+                                        a.dp(6),
+                                        Math.min(
+                                                center - hint.getMeasuredWidth() / 2,
+                                                a.root.getWidth()
+                                                        - hint.getMeasuredWidth()
+                                                        - a.dp(6)));
+                        p.topMargin = Math.max(a.dp(4), rail.getTop() - a.dp(36));
+                    } else
+                        p.topMargin =
+                                rail.getTop()
+                                        + items[index].getTop()
+                                        + (items[index].getHeight() - a.dp(28)) / 2;
                     hint.setLayoutParams(p);
                     hint.setAlpha(1);
                     hint.setTranslationX(0);
@@ -194,6 +211,19 @@ final class HomeDock {
         @Override
         public void draw(Canvas c) {
             Rect b = getBounds();
+            if (bottomMode) {
+                float edge = b.bottom - a.dp(4);
+                paint.setColor(0xff303036);
+                paint.setStyle(Paint.Style.FILL);
+                c.drawRoundRect(new RectF(b.left, b.top, b.right, edge), a.dp(9), a.dp(9), paint);
+                Path point = new Path();
+                point.moveTo(b.exactCenterX() - a.dp(4), edge - a.dp(1));
+                point.lineTo(b.exactCenterX(), b.bottom);
+                point.lineTo(b.exactCenterX() + a.dp(4), edge - a.dp(1));
+                point.close();
+                c.drawPath(point, paint);
+                return;
+            }
             float edge = b.right - a.dp(4), middle = b.exactCenterY();
             paint.setColor(0xff303036);
             paint.setStyle(Paint.Style.FILL);

@@ -7,6 +7,8 @@ class StorageService {
   static const String keyOrigin = 'origin';
   static const String keyRawConfig = 'config_raw_json';
   static const String keySelectedSite = 'selected_site';
+  static const String keyPreferredSite = 'preferred_site';
+  static const String keyPreferredLine = 'preferred_line';
   static const String keyWatchHistory = 'watch_history';
   static const String keyFavorites = 'favorites';
   static const String keyPrivateFavorites = 'private_favorites';
@@ -38,7 +40,13 @@ class StorageService {
   static const String keyPreferredQuality = 'preferred_quality';
   static const String keyDefaultAspectMode = 'default_aspect_mode';
   final SharedPreferences _prefs;
+  Future<void> _subscriptionQueue = Future<void>.value();
   StorageService(this._prefs);
+  Future<T> _editSubscriptions<T>(Future<T> Function() edit) {
+    final next = _subscriptionQueue.then((_) => edit());
+    _subscriptionQueue = next.then<void>((_) {}, onError: (Object _, StackTrace __) {});
+    return next;
+  }
   static Future<StorageService> init() async {
     final prefs = await SharedPreferences.getInstance();
     return StorageService(prefs);
@@ -141,13 +149,28 @@ class StorageService {
   }
 
   Future<void> saveSubscriptions(List<SubscriptionEntry> subs) async {
-    await _prefs.setString(
-      keySubscriptions,
-      jsonEncode(subs.map((s) => s.toJson()).toList()),
-    );
+    try {
+      final saved = await _prefs.setString(
+        keySubscriptions,
+        jsonEncode(subs.map((s) => s.toJson()).toList()),
+      );
+      if (!saved) throw StateError('订阅变更未能保存，请重试');
+    } catch (_) {
+      // The plugin updates its cache before the platform write completes.
+      // Re-read disk so a failed write does not look like a successful deletion.
+      await _prefs.reload();
+      rethrow;
+    }
   }
 
   Future<CmsConfig?> upsertSubscriptions(
+    List<SubscriptionEntry> incoming, {
+    List<CmsDepot>? depots,
+    String? activeDepotName,
+  }) => _editSubscriptions(() => _upsertSubscriptions(incoming,
+      depots: depots, activeDepotName: activeDepotName));
+
+  Future<CmsConfig?> _upsertSubscriptions(
     List<SubscriptionEntry> incoming, {
     List<CmsDepot>? depots,
     String? activeDepotName,
@@ -155,7 +178,7 @@ class StorageService {
     if (incoming.isEmpty) return loadSavedConfig();
     final current = getSubscriptions().toList();
     // Migrate legacy single config into subscriptions list if not yet present
-    if (current.isEmpty && rawConfig.trim().isNotEmpty) {
+    if (!_prefs.containsKey(keySubscriptions) && rawConfig.trim().isNotEmpty) {
       try {
         final legacyParsed = CmsParser.parseConfig(
           rawConfig,
@@ -186,12 +209,19 @@ class StorageService {
         );
       } catch (_) {}
     }
-
-    for (final entry in incoming) {
+    _ownLegacyDepots(current);
+    for (var index = 0; index < incoming.length; index++) {
+      final original = incoming[index];
+      final entry = index == 0 ? original.copyWith(
+        depots: depots ?? original.depots,
+        activeDepotName: activeDepotName ?? original.activeDepotName,
+      ) : original;
       final existingIdx = current.indexWhere(
         (s) =>
             s.id == entry.id ||
-            (entry.url.isNotEmpty && s.url == entry.url && s.group == entry.group),
+            (s.group == entry.group && s.isEffectivelyPrivate == entry.isEffectivelyPrivate &&
+              (entry.warehouseUrl.isNotEmpty ? s.warehouseUrl == entry.warehouseUrl :
+                (s.warehouseUrl.isEmpty && entry.url.isNotEmpty && s.url == entry.url))),
       );
       if (existingIdx >= 0) {
         current[existingIdx] = entry.copyWith(id: current[existingIdx].id);
@@ -202,18 +232,14 @@ class StorageService {
     await saveSubscriptions(current);
 
     final primary = incoming.first;
-    if (primary.rawContent.isNotEmpty && !primary.isPrivate) {
+    if (primary.rawContent.isNotEmpty && !primary.isEffectivelyPrivate) {
       await _prefs.setString(keyRawConfig, primary.rawContent);
       await _prefs.setString(keyOrigin, primary.url);
     }
-    if (depots != null && depots.isNotEmpty) {
-      await _prefs.setString(
-        keyDepots,
-        jsonEncode(depots.map((d) => d.toJson()).toList()),
-      );
-    }
-    if (activeDepotName != null) {
-      await _prefs.setString(keyActiveDepotName, activeDepotName);
+    // Directories now belong to registry entries, including private subscriptions.
+    await _prefs.setString(keyDepots, '[]');
+    if (!primary.isEffectivelyPrivate) {
+      await _prefs.setString(keyActiveDepotName, activeDepotName ?? primary.activeDepotName);
     }
     final merged = loadSavedConfig();
     if (merged != null &&
@@ -227,38 +253,84 @@ class StorageService {
     return merged;
   }
 
-  Future<CmsConfig?> removeSubscription(String id) async {
-    final next = getSubscriptions().where((s) => s.id != id).toList();
+  Future<CmsConfig?> removeSubscription(String id) =>
+      _editSubscriptions(() => _removeSubscription(id));
+
+  Future<CmsConfig?> _removeSubscription(String id) async {
+    final current = getSubscriptions();
+    final removed = current.where((s) => s.id == id).toList();
+    if (removed.isEmpty) return loadSavedConfig();
+    final next = current.where((s) {
+      if (s.id == id) return false;
+      // Older first-time pasted imports created these two IDs from the same
+      // payload. Remove that known accidental twin, not independent subscriptions.
+      if (removed.isNotEmpty &&
+          ((id == 'legacy_primary' && s.id == 'sub_primary') ||
+           (id == 'sub_primary' && s.id == 'legacy_primary'))) {
+        final old = removed.first;
+        if (s.url.isEmpty && old.url.isEmpty && s.rawContent == old.rawContent &&
+            s.group == old.group && s.isEffectivelyPrivate == old.isEffectivelyPrivate) {
+          return false;
+        }
+      }
+      return true;
+    }).toList();
+    // Move old global warehouse directories to their surviving owner before
+    // clearing the compatibility mirror. Never transfer a removed owner's dirs.
+    _ownLegacyDepots(next);
+    // The persisted registry, including [], is authoritative before legacy cleanup.
     await saveSubscriptions(next);
-    if (next.isEmpty) {
-      await _prefs.setString(keyRawConfig, '');
-      await _prefs.setString(keyOrigin, '');
+    final public = next.where((s) => !s.isEffectivelyPrivate).toList();
+    await _prefs.setString(keyRawConfig, public.isEmpty ? '' : public.first.rawContent);
+    await _prefs.setString(keyOrigin, public.isEmpty ? '' : public.first.url);
+    await _prefs.setString(keyDepots, '[]');
+    await _prefs.setString(keyActiveDepotName, public.isEmpty ? '' : public.first.activeDepotName);
+    final config = loadSavedConfig();
+    final sites = config?.publicSupportedSites ?? const <CmsSite>[];
+    if (!sites.any((s) => s.key == selectedSiteKey)) {
+      await _prefs.setString(keySelectedSite, sites.isEmpty ? '' : sites.first.key);
     }
-    return loadSavedConfig();
+    if (!sites.any((s) => s.key == (_prefs.getString(keyPreferredSite) ?? ''))) {
+      await _prefs.remove(keyPreferredSite);
+    }
+    return config;
+  }
+
+  void _ownLegacyDepots(List<SubscriptionEntry> subscriptions) {
+    final legacyOwner = subscriptions.indexWhere((s) => !s.isEffectivelyPrivate &&
+        s.url == configOrigin && (s.format == '多仓' || s.id == 'legacy_primary'));
+    if (legacyOwner >= 0) {
+      final owner = subscriptions[legacyOwner];
+      final dirs = <String, CmsDepot>{
+        for (final d in [...getSavedDepots(), ...owner.depots]) d.url: d,
+      };
+      subscriptions[legacyOwner] = owner.copyWith(depots: dirs.values.toList(),
+        activeDepotName: owner.activeDepotName.isNotEmpty ? owner.activeDepotName : activeDepotName);
+    }
   }
 
   Future<CmsConfig?> toggleSubscriptionPrivacy(
     String id,
     bool isPrivate,
-  ) async {
+  ) => _editSubscriptions(() async {
     final next = [
       for (final s in getSubscriptions())
         if (s.id == id) s.copyWith(isPrivate: isPrivate) else s,
     ];
     await saveSubscriptions(next);
     return loadSavedConfig();
-  }
+  });
 
-  Future<CmsConfig?> toggleSubscriptionEnabled(String id, bool enabled) async {
+  Future<CmsConfig?> toggleSubscriptionEnabled(String id, bool enabled) => _editSubscriptions(() async {
     final next = [
       for (final s in getSubscriptions())
         if (s.id == id) s.copyWith(enabled: enabled) else s,
     ];
     await saveSubscriptions(next);
     return loadSavedConfig();
-  }
+  });
 
-  Future<CmsConfig?> updateSubscriptionGroup(String id, String group) async {
+  Future<CmsConfig?> updateSubscriptionGroup(String id, String group) => _editSubscriptions(() async {
     final cleanGroup = group.trim().isEmpty ? '默认分组' : group.trim();
     final next = [
       for (final s in getSubscriptions())
@@ -266,16 +338,76 @@ class StorageService {
     ];
     await saveSubscriptions(next);
     return loadSavedConfig();
+  });
+
+  String _siteIdentity(CmsSite s) => jsonEncode([s.subscriptionId, s.sourceKey, s.api]);
+  Map<String, String> _pickerIdentities(Iterable<CmsSite> sites) {
+    final identities = <String, String>{};
+    for (final site in sites) {
+      final canonical = _siteIdentity(site);
+      identities[canonical] = canonical;
+      identities[jsonEncode([site.subscriptionId, site.key, site.api])] = canonical;
+      identities[jsonEncode([site.subscriptionId, '${site.sourceKey}_${site.subscriptionId}', site.api])] = canonical;
+    }
+    return identities;
+  }
+  static const _siteOrder = 'picker_site_order';
+  static const _removedSites = 'picker_removed_sites';
+  static const _siteAliases = 'site_key_aliases';
+  Map<String, String> _savedAliases() {
+    try { return Map<String, String>.from(jsonDecode(_prefs.getString(_siteAliases) ?? '{}')); } catch (_) { return {}; }
   }
 
+  Future<void> savePickerEdits(List<CmsSite> ordered, List<CmsSite> removed) => _editSubscriptions(() async {
+    final oldOrder = _prefs.getStringList(_siteOrder) ?? [];
+    final ids = ordered.map(_siteIdentity).toList();
+    final hidden = {...?_prefs.getStringList(_removedSites), ...removed.map(_siteIdentity)};
+    try {
+      final orderSaved = await _prefs.setStringList(_siteOrder, [...ids, ...oldOrder.where((id) => !ids.contains(id))]);
+      if (!orderSaved) throw StateError('线路顺序未能保存，请重试');
+      final removalSaved = await _prefs.setStringList(_removedSites, hidden.toList());
+      if (!removalSaved) throw StateError('线路删除未能保存，请重试');
+    } catch (_) {
+      await _prefs.reload();
+      rethrow;
+    }
+  });
+
   CmsConfig? loadSavedConfig() {
+    final config = _loadImportedConfig();
+    if (config == null) return null;
+    final identities = _pickerIdentities(config.sites);
+    final hidden = (_prefs.getStringList(_removedSites) ?? []).map((id) => identities[id] ?? id).toSet();
+    final byId = {for (final s in config.sites) if (!hidden.contains(_siteIdentity(s))) _siteIdentity(s): s};
+    final sites = <CmsSite>[];
+    for (final id in _prefs.getStringList(_siteOrder) ?? const <String>[]) {
+      final site = byId.remove(identities[id] ?? id);
+      if (site != null) sites.add(site);
+    }
+    return CmsConfig(sites: [...sites, ...byId.values], lives: config.lives,
+        depots: config.depots, spider: config.spider);
+  }
+
+  CmsConfig? _loadImportedConfig() {
     final subs = getSubscriptions().where((s) => s.enabled).toList();
     final savedDepots = getSavedDepots();
-    if (subs.isNotEmpty) {
+    final aliases = _savedAliases();
+    if (_prefs.containsKey(keySubscriptions)) {
+      if (getSubscriptions().isEmpty) return null;
       final mergedSites = <CmsSite>[];
       final mergedLives = <LiveSource>[];
-      final mergedDepots = <CmsDepot>[...savedDepots];
-      final seenDepotUrls = <String>{for (final d in savedDepots) d.url};
+      final mergedDepots = <CmsDepot>[];
+      final seenDepotUrls = <String>{};
+      final legacyOwners = subs.where((s) => !s.isEffectivelyPrivate &&
+          s.url == configOrigin && (s.format == '多仓' || s.id == 'legacy_primary'));
+      if (legacyOwners.isNotEmpty) {
+        final owner = legacyOwners.first;
+        for (final d in savedDepots) {
+          if (seenDepotUrls.add('${owner.id}|${d.url}')) {
+            mergedDepots.add(CmsDepot(name: d.name, url: d.url, subscriptionId: owner.id));
+          }
+        }
+      }
       final seenSiteKeys = <String>{};
       String spider = '';
 
@@ -293,13 +425,13 @@ class StorageService {
           if (spider.isEmpty && parsed.spider.isNotEmpty) {
             spider = parsed.spider;
           }
-          for (final d in parsed.depots) {
-            if (seenDepotUrls.add(d.url)) {
-              mergedDepots.add(d);
+          for (final d in [...sub.depots, ...parsed.depots]) {
+            if (!sub.isEffectivelyPrivate && seenDepotUrls.add('${sub.id}|${d.url}')) {
+              mergedDepots.add(CmsDepot(name: d.name, url: d.url, subscriptionId: sub.id));
             }
           }
           for (final site in parsed.sites) {
-            var uniqueKey = site.key;
+            var uniqueKey = aliases[jsonEncode([sub.id, site.key, site.api])] ?? site.key;
             if (!seenSiteKeys.add(uniqueKey)) {
               uniqueKey = '${site.key}_${sub.id}';
               seenSiteKeys.add(uniqueKey);
@@ -324,9 +456,7 @@ class StorageService {
           }
         } catch (_) {}
       }
-      if (mergedSites.isNotEmpty ||
-          mergedLives.isNotEmpty ||
-          mergedDepots.isNotEmpty) {
+      {
         return CmsConfig(
           sites: mergedSites,
           lives: mergedLives,
@@ -369,20 +499,8 @@ class StorageService {
       isPrivate: isPrivate,
       defaultName: customName,
     );
-    await _prefs.setString(keyRawConfig, rawJson);
-    await _prefs.setString(keyOrigin, origin.trim());
+    // upsert migrates only pre-existing legacy data, before storing this import.
     final effectiveDepots = depots ?? parsed.depots;
-    if (effectiveDepots.isNotEmpty) {
-      await _prefs.setString(
-        keyDepots,
-        jsonEncode(effectiveDepots.map((d) => d.toJson()).toList()),
-      );
-    } else if (depots != null && depots.isEmpty) {
-      await _prefs.setString(keyDepots, '[]');
-    }
-    if (activeDepotName != null) {
-      await _prefs.setString(keyActiveDepotName, activeDepotName);
-    }
     final fmt = CmsParser.detectSubscriptionFormat(rawJson, origin: origin);
     final entryName = customName.trim().isNotEmpty
         ? customName.trim()
@@ -405,6 +523,8 @@ class StorageService {
         isPrivate: isPrivate,
         enabled: true,
         rawContent: rawJson,
+        depots: effectiveDepots,
+        activeDepotName: activeDepotName ?? '',
         siteCount: parsed.supportedSites.length,
         liveCount: parsed.lives.length,
         updatedAt: DateTime.now().millisecondsSinceEpoch,
@@ -427,6 +547,24 @@ class StorageService {
     }
     return merged;
   }
+  String get preferredSiteKey {
+    final key = _prefs.getString(keyPreferredSite) ?? '';
+    return (loadSavedConfig()?.publicSupportedSites ?? const <CmsSite>[])
+        .any((s) => s.key == key) ? key : '';
+  }
+  String get preferredLineName => _prefs.getString(keyPreferredLine) ?? '';
+  Future<void> setPreferredSiteKey(String key) async {
+    if (key.isNotEmpty && !(loadSavedConfig()?.publicSupportedSites ?? const <CmsSite>[])
+        .any((s) => s.key == key)) throw const FormatException('请选择已启用的公开片源');
+    await _prefs.setString(keyPreferredSite, key);
+  }
+  Future<void> setPreferredLineName(String name) => _prefs.setString(keyPreferredLine, name);
+  List<CmsSite> prioritizeSites(Iterable<CmsSite> sites) {
+    final all = sites.toList();
+    final key = preferredSiteKey;
+    return [...all.where((s) => s.key == key), ...all.where((s) => s.key != key)];
+  }
+
   Future<void> setSelectedSiteKey(String key) async {
     await _prefs.setString(keySelectedSite, key);
   }
@@ -481,6 +619,8 @@ class StorageService {
   /// Selects the recommended line index from [lines] based on [preferredQuality]
   /// and the user's configured Netdisk drive order.
   int pickRecommendedLineIndex(List<CmsLine> lines) {
+    final preferred = lines.indexWhere((line) => line.name == preferredLineName && line.episodes.isNotEmpty);
+    if (preferred >= 0) return preferred;
     if (lines.isEmpty) return 0;
     final pref = preferredQuality;
     if (pref == 'auto') return 0;
@@ -712,12 +852,83 @@ class StorageService {
     await _prefs.setString(storageKey, '[]');
   }
   /// Exports a backup JSON string compatible with both Android (`MarcoMovie-1`) and Flutter.
+  String publicSupportedKey() {
+    final publicSites = loadSavedConfig()?.publicSupportedSites ?? const <CmsSite>[];
+    return publicSites.any((s) => s.key == selectedSiteKey) ? selectedSiteKey : '';
+  }
+  String _publicRawConfig(String raw, String origin) {
+    if (raw.isEmpty) return raw;
+    final parsed = CmsParser.parseConfig(raw, origin: origin);
+    if (parsed.sites.every((s) => s.isEffectivelyPrivate) &&
+        parsed.lives.every((s) => s.isEffectivelyPrivate) && parsed.depots.isEmpty) return '';
+    if (!parsed.sites.any((s) => s.isEffectivelyPrivate) && !parsed.lives.any((s) => s.isEffectivelyPrivate)) return raw;
+    bool privateItem(dynamic item) {
+      if (item is! Map) return false;
+      final flag = item['isPrivate'] ?? item['hidden'];
+      final group = (item['group'] ?? '').toString();
+      return flag == true || flag == 1 || flag == 'true' || flag == '1' || group.contains('隐私') || group.contains('私密');
+    }
+    try {
+      final value = jsonDecode(CmsParser.stripJsonComments(CmsParser.unpackConfigText(raw)));
+      if (value is Map) {
+        if (value['api'] != null && privateItem(value)) return '{"sites":[]}';
+        for (final key in ['sites', 'lives']) {
+          if (value[key] is List) value[key] = (value[key] as List).where((entry) => !privateItem(entry)).toList();
+        }
+        return jsonEncode(value);
+      }
+    } catch (_) { /* Inline playlists have no JSON container to filter. */ }
+    return jsonEncode({
+      'spider': parsed.spider,
+      'sites': [for (final s in parsed.sites.where((s) => !s.isEffectivelyPrivate)) {
+        'key': s.key, 'name': s.name, 'api': s.api, 'type': s.type,
+        'playUrl': s.playUrl, 'ext': s.ext, 'header': s.headers, 'group': s.group, 'searchable': s.searchable,
+      }],
+      'lives': [for (final l in parsed.publicLives) {'name': l.name, 'url': l.url, 'header': l.headers, 'group': l.group}],
+    });
+  }
+
+  static const _appearanceStrings = [keyWallpaperPreset, keyGlassBlurLevel, keyGridDensity,
+    keyCardSubtitleMode, keyPreferredQuality, keyDefaultAspectMode, keyPreferredLine];
+  static const _appearanceBooleans = [keyAmbientGlow, keyShowHeroBanner, keyShowContinueWatching];
+
   String exportBackupJson() {
+    final all = getSubscriptions();
+    final public = all.where((s) => !s.isEffectivelyPrivate).map((s) => s.copyWith(rawContent: _publicRawConfig(s.rawContent, s.url))).where((s) => s.rawContent.isNotEmpty).toList();
+    final primary = public.isEmpty ? null : public.first;
+    final publicIds = (_loadImportedConfig()?.sites ?? const <CmsSite>[]).where((s) => !s.isEffectivelyPrivate).map(_siteIdentity).toSet();
+    final identityAliases = _pickerIdentities(_loadImportedConfig()?.sites ?? const <CmsSite>[]);
+    final publicSites = (_loadImportedConfig()?.sites ?? const <CmsSite>[]).where((s) => !s.isEffectivelyPrivate).toList();
+    final aliases = <String, String>{};
+    for (final sub in public) {
+      final parsed = CmsParser.parseConfig(sub.rawContent, origin: sub.url, subscriptionId: sub.id);
+      for (final site in parsed.sites) {
+        final existingKey = _savedAliases()[jsonEncode([sub.id, site.key, site.api])] ?? site.key;
+        final matches = publicSites.where((s) => s.subscriptionId == sub.id && s.api == site.api &&
+            (s.key == existingKey || s.key == '${site.key}_${sub.id}'));
+        if (matches.isNotEmpty) aliases[jsonEncode([sub.id, site.key, site.api])] = matches.first.key;
+      }
+    }
+    String exportedIdentity(String identity) {
+      if (all.isNotEmpty) return identity;
+      final parts = (jsonDecode(identity) as List).toList();
+      parts[0] = 'restored_primary';
+      return jsonEncode(parts);
+    }
     return CmsParser.encodeBackupPayload(
-      origin: configOrigin,
-      rawConfig: rawConfig,
+      origin: !_prefs.containsKey(keySubscriptions) ? configOrigin : primary?.url ?? '',
+      rawConfig: !_prefs.containsKey(keySubscriptions) ? _publicRawConfig(rawConfig, configOrigin) : primary?.rawContent ?? '',
       settings: <String, dynamic>{
-        keySelectedSite: selectedSiteKey,
+        if (_prefs.containsKey(keySubscriptions)) keySubscriptions: public.map((s) => s.toJson()).toList(),
+        for (final key in [_siteOrder, _removedSites]) key: (_prefs.getStringList(key) ?? []).map((id) => identityAliases[id] ?? id).where(publicIds.contains).map(exportedIdentity).toList(),
+        _siteAliases: aliases,
+        keyPreferredSite: preferredSiteKey,
+        for (final key in _appearanceStrings) if (_prefs.containsKey(key)) key: _prefs.getString(key),
+        for (final key in _appearanceBooleans) if (_prefs.containsKey(key)) key: _prefs.getBool(key),
+        keySkipIntroSec: skipIntroSec,
+        keySkipOutroSec: skipOutroSec,
+        keyRepeatMode: repeatMode,
+        keySelectedSite: publicSupportedKey(),
         keyWatchHistory: _prefs.getString(keyWatchHistory) ?? '[]',
         keyFavorites: _prefs.getString(keyFavorites) ?? '[]',
         keySearchHistory: _prefs.getString(keySearchHistory) ?? '[]',
@@ -727,17 +938,25 @@ class StorageService {
       },
     );
   }
-  static String? _normalizeJsonArraySetting(dynamic value) {
-    if (value is List) {
-      return jsonEncode(value);
+  static String? _normalizeJsonArraySetting(dynamic value, {bool search = false}) {
+    final decoded = value is String ? jsonDecode(value) : value;
+    if (decoded is! List) throw const FormatException('备份记录必须是列表');
+    for (final item in decoded) {
+      if (search) {
+        if (item is! String) throw const FormatException('搜索记录格式无效');
+      } else {
+        if (item is! Map || item['site'] is! String || item['id'] is! String ||
+            (item['site'] as String).isEmpty || (item['id'] as String).isEmpty) {
+          throw const FormatException('观看记录或收藏缺少来源及影片标识');
+        }
+        for (final field in ['position', 'duration', 'index', 'updated']) {
+          if (item.containsKey(field) && (item[field] is! num || item[field] < 0)) {
+            throw FormatException('备份记录的 $field 无效');
+          }
+        }
+      }
     }
-    if (value is String) {
-      final trimmed = value.trim();
-      if (trimmed.isEmpty) return '[]';
-      final decoded = jsonDecode(trimmed);
-      if (decoded is List) return jsonEncode(decoded);
-    }
-    return null;
+    return jsonEncode(decoded);
   }
   /// Imports a backup JSON generated by either Android TV/Phone or Windows/Mac/iOS.
   /// Validates all fields before mutating preferences so failed restores preserve existing state.
@@ -751,8 +970,103 @@ class StorageService {
         ? _normalizeJsonArraySetting(settings[keyFavorites])
         : null;
     final nextSearch = settings.containsKey(keySearchHistory)
-        ? _normalizeJsonArraySetting(settings[keySearchHistory])
+        ? _normalizeJsonArraySetting(settings[keySearchHistory], search: true)
         : null;
+    if (settings.containsKey(keyPreferredSite) && settings[keyPreferredSite] is! String) {
+      throw const FormatException('偏好源设置格式无效');
+    }
+    final incomingAliases = settings[_siteAliases];
+    if (incomingAliases != null && (incomingAliases is! Map || incomingAliases.entries.any((e) => e.key is! String || e.value is! String || (e.value as String).isEmpty))) {
+      throw const FormatException('来源标识记录无效');
+    }
+    final aliases = incomingAliases == null ? <String, String>{} : Map<String, String>.from(incomingAliases as Map);
+    for (final identity in aliases.keys) {
+      final parts = jsonDecode(identity);
+      if (parts is! List || parts.length != 3 || parts.any((p) => p is! String)) throw const FormatException('来源标识记录无效');
+    }
+    final pickerEdits = <String, List<String>>{};
+    final privateIdentities = (_loadImportedConfig()?.sites ?? const <CmsSite>[]).where((s) => s.isEffectivelyPrivate).map(_siteIdentity).toSet();
+    for (final key in [_siteOrder, _removedSites]) {
+      final value = settings[key];
+      if (value == null) continue;
+      if (value is! List || value.any((v) => v is! String)) throw const FormatException('线路排序记录无效');
+      for (final identity in value.cast<String>()) {
+        final parts = jsonDecode(identity);
+        if (parts is! List || parts.length != 3 || parts.any((p) => p is! String) || privateIdentities.contains(identity)) {
+          throw const FormatException('线路排序标识无效');
+        }
+      }
+      pickerEdits[key] = value.cast<String>();
+    }
+    for (final key in _appearanceStrings) {
+      if (settings.containsKey(key) && settings[key] is! String) throw const FormatException('外观设置格式无效');
+    }
+    for (final key in _appearanceBooleans) {
+      if (settings.containsKey(key) && settings[key] is! bool) throw const FormatException('外观设置格式无效');
+    }
+    final incoming = <SubscriptionEntry>[];
+    final ids = <String>{};
+    final updatedSubs = settings[keySubscriptions];
+    if (updatedSubs != null) {
+      if (updatedSubs is! List) throw const FormatException('订阅列表格式无效');
+      for (final item in updatedSubs) {
+        if (item is! Map) throw const FormatException('订阅条目格式无效');
+        final sub = SubscriptionEntry.fromJson(Map<String, dynamic>.from(item));
+        if (sub.id.isEmpty || !ids.add(sub.id) || sub.isEffectivelyPrivate || sub.rawContent.isEmpty) {
+          throw const FormatException('常规备份包含无效订阅');
+        }
+        CmsParser.parseConfig(sub.rawContent, origin: sub.url);
+        incoming.add(sub);
+      }
+    } else if (decoded.rawConfig.isNotEmpty) {
+      incoming.add(SubscriptionEntry(id: 'restored_primary', name: '已恢复的订阅',
+          url: decoded.origin, rawContent: decoded.rawConfig));
+    }
+    final incomingIds = incoming.map((s) => s.id).toSet();
+    final rawIdentities = <String>{};
+    for (final sub in incoming) {
+      final parsed = CmsParser.parseConfig(sub.rawContent, origin: sub.url);
+      for (final site in parsed.sites) {
+        rawIdentities.add(jsonEncode([sub.id, site.key, site.api]));
+      }
+    }
+    if (aliases.keys.any((identity) => !rawIdentities.contains(identity)) ||
+        aliases.values.toSet().length != aliases.length ||
+        pickerEdits.values.expand((v) => v).any((identity) =>
+            !incomingIds.contains((jsonDecode(identity) as List).first))) {
+      throw const FormatException('线路管理记录与订阅不匹配');
+    }
+    if (updatedSubs != null || incoming.isNotEmpty) {
+      final privateSubs = getSubscriptions().where((s) => s.isEffectivelyPrivate).toList();
+      final privateIds = privateSubs.map((s) => s.id).toSet();
+      if (incoming.any((s) => privateIds.contains(s.id))) throw const FormatException('订阅标识冲突');
+      await saveSubscriptions([...incoming, ...privateSubs]);
+      if (incoming.isEmpty) {
+        await _prefs.remove(keyRawConfig);
+        await _prefs.remove(keyOrigin);
+      }
+    }
+    final privateSubIds = getSubscriptions().where((s) => s.isEffectivelyPrivate).map((s) => s.id).toSet();
+    final retainedAliases = _savedAliases()..removeWhere((key, _) {
+      try { return !privateSubIds.contains((jsonDecode(key) as List).first); } catch (_) { return true; }
+    });
+    retainedAliases.addAll(aliases);
+    await _prefs.setString(_siteAliases, jsonEncode(retainedAliases));
+    for (final entry in pickerEdits.entries) {
+      final retainedPrivate = (_prefs.getStringList(entry.key) ?? []).where(privateIdentities.contains);
+      await _prefs.setStringList(entry.key, [...entry.value, ...retainedPrivate]);
+    }
+    for (final key in _appearanceStrings) {
+      if (settings[key] is String) await _prefs.setString(key, settings[key] as String);
+    }
+    for (final key in _appearanceBooleans) {
+      if (settings[key] is bool) await _prefs.setBool(key, settings[key] as bool);
+    }
+    for (final key in [keySkipIntroSec, keySkipOutroSec]) {
+      final value = settings[key];
+      if (value is int && value >= 0 && value <= 600) await _prefs.setInt(key, value);
+    }
+    if (['off','one','all'].contains(settings[keyRepeatMode])) await setRepeatMode(settings[keyRepeatMode] as String);
     CmsConfig? parsedConfig = decoded.parsedConfig;
     if (decoded.rawConfig.isNotEmpty) {
       await _prefs.setString(keyRawConfig, decoded.rawConfig);
@@ -765,6 +1079,11 @@ class StorageService {
           parsedConfig.supportedSites.first.key,
         );
       }
+    }
+    if (settings[keyPreferredSite] is String) {
+      final key = settings[keyPreferredSite] as String;
+      final exists = (loadSavedConfig()?.publicSupportedSites ?? const <CmsSite>[]).any((s) => s.key == key);
+      await setPreferredSiteKey(exists ? key : '');
     }
     if (settings[keySelectedSite] is String) {
       await setSelectedSiteKey(settings[keySelectedSite] as String);
@@ -790,6 +1109,6 @@ class StorageService {
     if (settings[keyAutoNext] is bool) {
       await setAutoNext(settings[keyAutoNext] as bool);
     }
-    return parsedConfig;
+    return loadSavedConfig();
   }
 }

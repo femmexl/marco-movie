@@ -219,7 +219,7 @@ public final class SchedulingChecks {
         for (int i = 0; i < 18; i++) s60.step(1f / 60);
         check(Math.abs(s30.value - s60.value) < .001f, "same motion timing across frame rates");
 
-        // R01 regression: wedged background call on SourceGate unblocks waiting foreground call
+        // A wedged delegate must never be re-entered while the old holder is running.
         SourceGate wedgedGate = new SourceGate();
         CountDownLatch bgEntered = new CountDownLatch(1);
         CountDownLatch releaseBg = new CountDownLatch(1);
@@ -264,11 +264,14 @@ public final class SchedulingChecks {
         waiting(fgThread);
         SourceGate.markWedged(bgHolder.get());
         check(
-                fgCompleted.await(1, TimeUnit.SECONDS),
-                "foreground call unblocks when background gate holder is marked wedged");
+                !fgCompleted.await(150, TimeUnit.MILLISECONDS),
+                "foreground never overlaps a wedged background delegate");
         releaseBg.countDown();
         bgThread.join(1000);
         fgThread.join(1000);
+        check(
+                wedgedGate.call(true, () -> 42) == 42,
+                "gate becomes reusable only after old call exits");
 
         System.out.println(checks + " scheduling/cache/motion checks passed");
     }

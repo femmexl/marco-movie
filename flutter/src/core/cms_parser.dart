@@ -820,6 +820,12 @@ class CmsParser {
     return entries;
   }
 
+  /// Script documents may be retained as subscriptions without claiming a runtime.
+  static bool looksLikeScript(String raw) =>
+      RegExp(r'^\s*function\s+__jsEvalReturn\s*\(', multiLine: true).hasMatch(raw) ||
+      RegExp(r'^\s*(?:class\s+Spider\b|def\s+(?:homeContent|searchContent)\s*\()', multiLine: true).hasMatch(raw) ||
+      RegExp(r'^\s*(?:(?:var|let|const)\s+rule\s*=|export\s+default\b)', multiLine: true).hasMatch(raw);
+
   /// Parses TVBox JSON, Multi-Depot JSON, Direct MacCMS VOD JSON/XML, M3U/M3U8, or TXT subscriptions.
   static CmsConfig parseConfig(
     String rawJson, {
@@ -835,6 +841,19 @@ class CmsParser {
     final trimmedUnpacked = unpacked.trim();
     if (trimmedUnpacked.isEmpty) {
       throw const FormatException('配置内容为空');
+    }
+
+    if (looksLikeScript(trimmedUnpacked)) {
+      final python = RegExp(r'^\s*(?:class\s+Spider\b|def\s+)', multiLine: true).hasMatch(trimmedUnpacked);
+      return CmsConfig(sites: [CmsSite(
+        key: 'script_${subscriptionId.isEmpty ? 'imported' : subscriptionId}',
+        name: defaultName.isEmpty ? (python ? 'Python 订阅' : 'JavaScript 订阅') : defaultName,
+        type: 3, api: python ? 'csp_LocalScript.py' :
+            (trimmedUnpacked.contains('export default') || trimmedUnpacked.contains('__jsEvalReturn')
+                ? 'csp_LocalScript.js' : 'csp_LocalRule.js'),
+        ext: jsonEncode({'script': trimmedUnpacked, 'origin': origin}),
+        group: groupLabel, isPrivate: isPrivate, subscriptionId: subscriptionId,
+      )]);
     }
 
     // 1. Check for XML MacCMS VOD response (`<?xml` / `<rss` / `<list`)
@@ -965,7 +984,13 @@ class CmsParser {
           if (item is! Map) continue;
           final rawUrl =
               (item['url'] ?? item['sourceUrl'] ?? item['api'] ?? '').toString().trim();
-          final resolved = resolveUrl(origin, extractAndNormalizeUrl(rawUrl));
+          // Labels such as 更新时间 are metadata, not relative network addresses.
+          if (rawUrl.isEmpty || (!RegExp(r'^https?://', caseSensitive: false).hasMatch(rawUrl)
+              && !rawUrl.startsWith('//') && !rawUrl.startsWith('/')
+              && !rawUrl.startsWith('./') && !rawUrl.startsWith('../')
+              && !RegExp(r'^[^\s]+\.[a-zA-Z0-9]{1,8}(?:[?#].*)?$').hasMatch(rawUrl))) continue;
+          final resolved = resolveUrl(origin, rawUrl.startsWith('http')
+              ? normalizeUrl(rawUrl) : rawUrl);
           if (!resolved.startsWith('http://') && !resolved.startsWith('https://')) {
             continue;
           }
@@ -978,6 +1003,7 @@ class CmsParser {
             CmsDepot(
               name: name.isEmpty ? '仓库 ${depots.length + 1}' : name,
               url: resolved,
+              subscriptionId: subscriptionId,
             ),
           );
         }
@@ -1057,7 +1083,9 @@ class CmsParser {
           continue;
         }
         final url = resolveUrl(origin, (item['url'] ?? '').toString());
-        if (url.startsWith('http://') || url.startsWith('https://')) {
+        final inline = Uri.tryParse(url)?.data;
+        if (url.startsWith('http://') || url.startsWith('https://') ||
+            inline != null && inline.mimeType == 'text/plain' && inline.isBase64) {
           lives.add(
             LiveSource(
               name: (item['name'] ?? '直播源').toString().trim(),
@@ -1722,7 +1750,7 @@ class CmsParser {
 
   static String _cleanPosterUrl(String raw) {
     var cleaned = raw.trim();
-    final atIdx = cleaned.indexOf(RegExp(r'@(?i:Referer|User-Agent)='));
+    final atIdx = cleaned.indexOf(RegExp(r'@(?:Referer|User-Agent)=', caseSensitive: false));
     if (atIdx > 0) {
       cleaned = cleaned.substring(0, atIdx).trim();
     }

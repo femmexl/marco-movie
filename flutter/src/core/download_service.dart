@@ -191,8 +191,7 @@ class DownloadService extends ChangeNotifier {
     ..idleTimeout = const Duration(seconds: 30)
     ..maxConnectionsPerHost = 8
     ..userAgent = null
-    ..autoUncompress = false
-    ..badCertificateCallback = (_, __, ___) => true;
+    ..autoUncompress = false;
 
   bool get isReady => _ready;
   String get rootPath => _root?.path ?? '';

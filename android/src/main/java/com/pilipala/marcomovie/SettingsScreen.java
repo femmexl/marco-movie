@@ -20,7 +20,7 @@ final class SettingsScreen {
         a.renderPage("", "");
         a.body.addView(a.text(title, 28, MainActivity.WHITE));
         a.gap(a.body, 8);
-        a.paragraph(note);
+        if (!note.isEmpty()) a.paragraph(note);
     }
 
     void link(String title, String detail, String key, Runnable action) {
@@ -30,7 +30,7 @@ final class SettingsScreen {
         copy.addView(a.text(title, 17, MainActivity.WHITE));
         TextView caption = a.text(detail, 12, MainActivity.MUTED);
         caption.setPadding(0, a.dp(4), 0, 0);
-        copy.addView(caption);
+        if (!detail.isEmpty()) copy.addView(caption);
         row.addView(copy, new LinearLayout.LayoutParams(0, -2, 1));
         row.addView(a.text("›", 23, MainActivity.MUTED));
         row.setTag(key);
@@ -65,15 +65,11 @@ final class SettingsScreen {
     }
 
     void show() {
-        page("设置", "让画面、播放和遥控操作适合你的电视。");
-        link("首页与壁纸", "海报密度、内容分区、壁纸、动态效果", "settings-appearance", () -> open(this::appearance));
-        link("播放与字幕", "播放器、解码、缓冲、比例、片头片尾、字幕与弹幕", "settings-playback", () -> open(this::playback));
-        link("搜索与数据", "全局搜索、来源配置、备份与还原", "settings-data", () -> open(this::data));
-        link(
-                "软件更新",
-                "检查新版、下载与安装",
-                "settings-updates",
-                () -> open(() -> new UpdateScreen(a).show()));
+        page("设置", "");
+        link("首页与壁纸", "", "settings-appearance", () -> open(this::appearance));
+        link("播放与字幕", "", "settings-playback", () -> open(this::playback));
+        link("搜索与数据", "", "settings-data", () -> open(this::data));
+        link("软件更新", "", "settings-updates", () -> open(() -> new UpdateScreen(a).show()));
     }
 
     void decoders() {
@@ -137,6 +133,11 @@ final class SettingsScreen {
                         : a.prefs.getBoolean(Prefs.HOME_AMBIENT, true) ? "海报配色柔光" : "纯深色",
                 "settings-wallpaper",
                 () -> open(this::wallpaper));
+        toggle(
+                "减少透明效果",
+                Prefs.REDUCED_TRANSPARENCY,
+                false,
+                () -> com.pilipala.glass.GlassworkSurface.invalidateBackdrop(a.root));
         toggle("开屏动画", Prefs.STARTUP_ANIMATION, true, null);
         toggle("海报配色柔光", Prefs.HOME_AMBIENT, true, null);
         toggle(
@@ -592,6 +593,30 @@ final class SettingsScreen {
                             final Cms.Config config =
                                     configJson == null ? null : Cms.parseConfig(configJson, origin);
                             final org.json.JSONObject settings = backup.optJSONObject("settings");
+                            if (settings != null) {
+                                for (String key :
+                                        new String[] {
+                                            Prefs.WATCH_HISTORY,
+                                            Prefs.FAVORITES,
+                                            Prefs.GLOBAL_SEARCH_HISTORY
+                                        }) {
+                                    if (!settings.has(key)) continue;
+                                    org.json.JSONArray rows =
+                                            new org.json.JSONArray(
+                                                    String.valueOf(settings.get(key)));
+                                    for (int i = 0; i < rows.length(); i++) {
+                                        if (Prefs.GLOBAL_SEARCH_HISTORY.equals(key)) {
+                                            if (!(rows.get(i) instanceof String))
+                                                throw new IOException("Invalid search history");
+                                        } else {
+                                            org.json.JSONObject item = rows.getJSONObject(i);
+                                            if (item.optString("id").isEmpty()
+                                                    || item.optString("site").isEmpty())
+                                                throw new IOException("Invalid bookmark");
+                                        }
+                                    }
+                                }
+                            }
                             a.ui.post(
                                     () ->
                                             new AppDialog.Builder(a)

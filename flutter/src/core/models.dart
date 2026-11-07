@@ -1,23 +1,31 @@
 /// Core domain models shared across macOS, iOS, iPadOS, Windows, and Android backup schemas.
 library;
+
+import 'csp_bridge.dart';
+
 class CmsDepot {
   final String name;
   final String url;
+  final String subscriptionId;
   const CmsDepot({
     required this.name,
     required this.url,
+    this.subscriptionId = '',
   });
   Map<String, dynamic> toJson() => {
-        'name': name,
-        'url': url,
-      };
+    'name': name,
+    'url': url,
+    'subscriptionId': subscriptionId,
+  };
   factory CmsDepot.fromJson(Map<String, dynamic> json) {
     return CmsDepot(
       name: (json['name'] ?? '').toString().trim(),
       url: (json['url'] ?? '').toString().trim(),
+      subscriptionId: (json['subscriptionId'] ?? '').toString(),
     );
   }
 }
+
 class SubscriptionEntry {
   final String id;
   final String name;
@@ -30,6 +38,9 @@ class SubscriptionEntry {
   final int siteCount;
   final int liveCount;
   final int updatedAt;
+  final String warehouseUrl;
+  final String activeDepotName;
+  final List<CmsDepot> depots;
   const SubscriptionEntry({
     required this.id,
     required this.name,
@@ -42,6 +53,9 @@ class SubscriptionEntry {
     this.siteCount = 0,
     this.liveCount = 0,
     this.updatedAt = 0,
+    this.warehouseUrl = '',
+    this.activeDepotName = '',
+    this.depots = const [],
   });
   SubscriptionEntry copyWith({
     String? id,
@@ -55,6 +69,9 @@ class SubscriptionEntry {
     int? siteCount,
     int? liveCount,
     int? updatedAt,
+    String? warehouseUrl,
+    String? activeDepotName,
+    List<CmsDepot>? depots,
   }) {
     return SubscriptionEntry(
       id: id ?? this.id,
@@ -68,23 +85,30 @@ class SubscriptionEntry {
       siteCount: siteCount ?? this.siteCount,
       liveCount: liveCount ?? this.liveCount,
       updatedAt: updatedAt ?? this.updatedAt,
+      warehouseUrl: warehouseUrl ?? this.warehouseUrl,
+      activeDepotName: activeDepotName ?? this.activeDepotName,
+      depots: depots ?? this.depots,
     );
   }
+
   bool get isEffectivelyPrivate =>
       isPrivate || group.contains('隐私') || group.contains('私密');
   Map<String, dynamic> toJson() => {
-        'id': id,
-        'name': name,
-        'url': url,
-        'group': group,
-        'format': format,
-        'isPrivate': isEffectivelyPrivate,
-        'enabled': enabled,
-        'rawContent': rawContent,
-        'siteCount': siteCount,
-        'liveCount': liveCount,
-        'updatedAt': updatedAt,
-      };
+    'id': id,
+    'name': name,
+    'url': url,
+    'group': group,
+    'format': format,
+    'isPrivate': isEffectivelyPrivate,
+    'enabled': enabled,
+    'rawContent': rawContent,
+    'siteCount': siteCount,
+    'liveCount': liveCount,
+    'updatedAt': updatedAt,
+    'warehouseUrl': warehouseUrl,
+    'activeDepotName': activeDepotName,
+    'depots': depots.map((d) => d.toJson()).toList(),
+  };
   factory SubscriptionEntry.fromJson(Map<String, dynamic> json) {
     final g = (json['group'] ?? '').toString().trim();
     final f = (json['format'] ?? '').toString().trim();
@@ -95,7 +119,8 @@ class SubscriptionEntry {
       url: (json['url'] ?? '').toString().trim(),
       group: cleanGroup,
       format: f.isEmpty ? 'JSON' : f,
-      isPrivate: json['isPrivate'] == true ||
+      isPrivate:
+          json['isPrivate'] == true ||
           cleanGroup.contains('隐私') ||
           cleanGroup.contains('私密'),
       enabled: json['enabled'] != false,
@@ -103,9 +128,16 @@ class SubscriptionEntry {
       siteCount: (json['siteCount'] as num?)?.toInt() ?? 0,
       liveCount: (json['liveCount'] as num?)?.toInt() ?? 0,
       updatedAt: (json['updatedAt'] as num?)?.toInt() ?? 0,
+      warehouseUrl: (json['warehouseUrl'] ?? '').toString(),
+      activeDepotName: (json['activeDepotName'] ?? '').toString(),
+      depots: (json['depots'] as List? ?? const [])
+          .whereType<Map>()
+          .map((d) => CmsDepot.fromJson(Map<String, dynamic>.from(d)))
+          .toList(),
     );
   }
 }
+
 class CmsFilter {
   final String primaryTab;
   final String categoryId;
@@ -144,8 +176,11 @@ class CmsFilter {
     );
   }
 }
+
 class CmsSite {
   final String key;
+  final String? originalKey;
+  String get sourceKey => originalKey ?? key;
   final String name;
   final int type;
   final String api;
@@ -158,6 +193,7 @@ class CmsSite {
   final String subscriptionId;
   const CmsSite({
     required this.key,
+    this.originalKey,
     required this.name,
     required this.type,
     required this.api,
@@ -184,6 +220,7 @@ class CmsSite {
   }) {
     return CmsSite(
       key: key ?? this.key,
+      originalKey: originalKey ?? this.key,
       name: name ?? this.name,
       type: type ?? this.type,
       api: api ?? this.api,
@@ -196,34 +233,65 @@ class CmsSite {
       subscriptionId: subscriptionId ?? this.subscriptionId,
     );
   }
+
   bool get isHttpApi {
     final lower = api.trim().toLowerCase();
     return lower.startsWith('http://') || lower.startsWith('https://');
   }
+
   bool get isM3uVodApi {
     return api.trim().toLowerCase().startsWith('m3u_vod://');
   }
+
   bool get isScriptOrJarApi {
     final lower = api.trim().toLowerCase().split('?').first;
     return lower.startsWith('csp_') ||
         lower.endsWith('.js') ||
+        lower.endsWith('.mjs') ||
         lower.endsWith('.jar') ||
         lower.endsWith('.py');
   }
+
+  bool get isJavaScriptSource {
+    final path = api.toLowerCase().split(RegExp(r'[?#]')).first;
+    return api == 'csp_LocalScript.js' ||
+        (type == 3 &&
+            isHttpApi &&
+            (path.endsWith('.js') || path.endsWith('.mjs')));
+  }
+
+  bool get isPythonSource =>
+      api == 'csp_LocalScript.py' ||
+      (type == 3 &&
+          isHttpApi &&
+          Uri.tryParse(api)?.path.toLowerCase().endsWith('.py') == true);
+
   /// Supports standard JSON/XML CMS (`type` 0 or 1), remote HTTP spider endpoints (`type` 4),
   /// M3U/TXT VOD playlists (`m3u_vod://`), and TVBox `csp_*` / `.js` spider sites via `CspBridge`.
+  bool get isEmby => api.startsWith('emby://account/');
+  bool get isCatPaw => api.startsWith('catpaw://');
   bool get canBrowse =>
-      isM3uVodApi ||
-      ((isHttpApi || isScriptOrJarApi) &&
-          (type == 0 || type == 1 || type == 4 || type == 3 || type == -1));
+      isEmby ||
+      isCatPaw ||
+      (isScriptOrJarApi
+          ? CspBridge.hasAdapter(this)
+          : isM3uVodApi ||
+                ((isHttpApi || isScriptOrJarApi) &&
+                    (type == 0 ||
+                        type == 1 ||
+                        type == 4 ||
+                        type == 3 ||
+                        type == -1)));
   bool get isEffectivelyPrivate =>
       isPrivate || group.contains('隐私') || group.contains('私密');
   bool get requiresPluginRuntime => !canBrowse;
   bool get supported => canBrowse;
   String get unsupportedReason {
-    return '非标准接口 (${api.trim()})';
+    if (isScriptOrJarApi) return '该插件需要相应运行环境，可在兼容设备上使用';
+    return '当前设备不支持此接口类型';
   }
 }
+
 class LiveSource {
   final String name;
   final String url;
@@ -259,6 +327,7 @@ class LiveSource {
     );
   }
 }
+
 class CmsConfig {
   final List<CmsSite> sites;
   final List<LiveSource> lives;
@@ -272,14 +341,12 @@ class CmsConfig {
   });
   List<CmsSite> get supportedSites =>
       sites.where((s) => s.supported).toList(growable: false);
-  List<CmsSite> get publicSupportedSites =>
-      sites
-          .where((s) => s.supported && !s.isEffectivelyPrivate)
-          .toList(growable: false);
-  List<CmsSite> get privateSupportedSites =>
-      sites
-          .where((s) => s.supported && s.isEffectivelyPrivate)
-          .toList(growable: false);
+  List<CmsSite> get publicSupportedSites => sites
+      .where((s) => s.supported && !s.isEffectivelyPrivate)
+      .toList(growable: false);
+  List<CmsSite> get privateSupportedSites => sites
+      .where((s) => s.supported && s.isEffectivelyPrivate)
+      .toList(growable: false);
   List<LiveSource> get publicLives =>
       lives.where((l) => !l.isEffectivelyPrivate).toList(growable: false);
   List<LiveSource> get privateLives =>
@@ -289,23 +356,39 @@ class CmsConfig {
   bool get isMultiDepotOnly =>
       sites.isEmpty && lives.isEmpty && depots.isNotEmpty;
 }
+
 class CmsCategory {
   final String id;
   final String name;
+
   /// MacCMS `type_pid`; empty or `0` for top-level categories.
   final String parentId;
   const CmsCategory({required this.id, required this.name, this.parentId = ''});
   bool get isTopLevel => parentId.isEmpty || parentId == '0';
 }
+
 class CmsEpisode {
   final String name;
   final String url;
   final Map<String, String> headers;
+
+  /// Ephemeral server playback metadata; never part of subscription/history backups.
+  final Map<String, dynamic> playbackSession;
+  /// Short-lived quality choices returned for one episode; not saved in history.
+  final List<CmsEpisode> variants;
+  final String externalAudioUrl;
   const CmsEpisode({
     required this.name,
     required this.url,
     this.headers = const {},
+    this.playbackSession = const {},
+    this.variants = const [],
+    this.externalAudioUrl = '',
   });
+  bool get isScriptEpisode => url.startsWith('mmjs://play?');
+  bool get needsSourceResolution =>
+      isScriptEpisode || url.startsWith('mmemby://play?') || url.startsWith('mmpaw://play?');
+
   /// Whether [url] points to an already-downloaded local file (offline playback).
   bool get isLocalFile {
     final raw = url.trim();
@@ -313,6 +396,7 @@ class CmsEpisode {
         RegExp(r'^[a-zA-Z]:[\\/]').hasMatch(raw) ||
         raw.toLowerCase().startsWith('file://');
   }
+
   bool get isDirectPlayable {
     if (isLocalFile) return true;
     final u = url.trim().toLowerCase();
@@ -336,11 +420,13 @@ class CmsEpisode {
     return true;
   }
 }
+
 class CmsLine {
   final String name;
   final List<CmsEpisode> episodes;
   const CmsLine({required this.name, required this.episodes});
 }
+
 class CmsVideo {
   final String id;
   final String title;
@@ -365,16 +451,14 @@ class CmsVideo {
     this.lines = const [],
   });
 }
+
 class CmsListing {
   final int page;
   final int pageCount;
   final List<CmsVideo> videos;
-  const CmsListing({
-    this.page = 1,
-    this.pageCount = 1,
-    this.videos = const [],
-  });
+  const CmsListing({this.page = 1, this.pageCount = 1, this.videos = const []});
 }
+
 class LiveChannel {
   final String name;
   final String group;
@@ -387,11 +471,13 @@ class LiveChannel {
     this.logo = '',
   });
 }
+
 class LiveGroup {
   final String name;
   final List<LiveChannel> channels;
   const LiveGroup({required this.name, required this.channels});
 }
+
 class WatchHistoryEntry {
   final String site;
   final String id;
@@ -424,18 +510,19 @@ class WatchHistoryEntry {
     if (duration <= 0) return 0.0;
     return (position / duration).clamp(0.0, 1.0);
   }
+
   Map<String, dynamic> toJson() => {
-        'site': site,
-        'id': id,
-        'title': title,
-        'poster': poster,
-        'line': line,
-        'episode': episode,
-        'index': index,
-        'position': position < 0 ? 0 : position,
-        'duration': duration < 0 ? 0 : duration,
-        'updated': updated,
-      };
+    'site': site,
+    'id': id,
+    'title': title,
+    'poster': poster,
+    'line': line,
+    'episode': episode,
+    'index': index,
+    'position': position < 0 ? 0 : position,
+    'duration': duration < 0 ? 0 : duration,
+    'updated': updated,
+  };
   factory WatchHistoryEntry.fromJson(Map<String, dynamic> json) {
     final pos = (json['position'] as num?)?.toInt() ?? 0;
     final dur = (json['duration'] as num?)?.toInt() ?? 0;
@@ -453,6 +540,7 @@ class WatchHistoryEntry {
     );
   }
 }
+
 class FavoriteEntry {
   final String site;
   final String id;
@@ -470,13 +558,13 @@ class FavoriteEntry {
   });
   String get key => '$site\n$id';
   Map<String, dynamic> toJson() => {
-        'site': site,
-        'id': id,
-        'title': title,
-        'poster': poster,
-        'remarks': remarks,
-        'updated': updated,
-      };
+    'site': site,
+    'id': id,
+    'title': title,
+    'poster': poster,
+    'remarks': remarks,
+    'updated': updated,
+  };
   factory FavoriteEntry.fromJson(Map<String, dynamic> json) {
     return FavoriteEntry(
       site: (json['site'] ?? '').toString(),

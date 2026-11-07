@@ -74,7 +74,7 @@ public final class LiteCatalog {
    }finally{IN_FLIGHT.remove(c);c.disconnect();}
   }throw new IOException("重定向过多");
  }
- public static List<Site> parse(String raw,String base)throws Exception {
+ public static JSONObject decodeConfig(String raw)throws Exception {
   String cleaned=withoutComments(raw).trim();
   if(cleaned.startsWith("\ufeff"))cleaned=cleaned.substring(1).trim();
   int star=cleaned.indexOf("**");
@@ -84,12 +84,24 @@ public final class LiteCatalog {
     if(decoded.trim().startsWith("{"))cleaned=withoutComments(decoded).trim();
    }catch(Exception ignored){}
   }
-  JSONArray rows=new JSONObject(cleaned).optJSONArray("sites");if(rows==null||rows.length()==0)throw new IOException("配置没有 sites 列表");
+  return new JSONObject(cleaned);
+ }
+ public static String importConfig(String raw,String origin)throws Exception {
+  return com.pilipala.source.Warehouse.resolve(raw,origin,
+   new com.pilipala.source.Warehouse.Reader(){public String read(String url)throws Exception{return fetch(url,null);}},
+   new com.pilipala.source.Warehouse.Decoder(){public JSONObject decode(String text)throws Exception{return decodeConfig(text);}},
+   new com.pilipala.source.Warehouse.Validator(){public void validate(String text,String base)throws Exception{parse(text,base);}});
+ }
+ public static List<Site> parse(String raw,String base)throws Exception {
+  JSONObject document=decodeConfig(raw);
+  base=document.optString(com.pilipala.source.Warehouse.ORIGIN,base);
+  JSONArray rows=document.optJSONArray("sites");if(rows==null||rows.length()==0)throw new IOException("配置没有 sites 列表");
   List<Site> sites=new ArrayList<Site>();
   for(int i=0;i<rows.length()&&i<500;i++){JSONObject row=rows.getJSONObject(i);Site s=new Site();
    s.name=row.optString("name","未命名");s.key=row.optString("key",s.name+"_"+i);s.type=row.optInt("type",-1);s.api=row.optString("api");
    if(!s.api.startsWith("csp_")&&!s.api.startsWith("js_")&&base!=null&&base.length()>0)try{s.api=new URL(new URL(base),s.api).toString();}catch(Exception ignored){}
    s.supported=s.type==1&&row.optString("playUrl").length()==0;try{http(s.api);}catch(Exception invalid){s.supported=false;}
+   if(s.api.startsWith("emby://account/"))s.supported=true;
    JSONObject hs=row.optJSONObject("header");if(hs!=null){Iterator<String> keys=hs.keys();while(keys.hasNext()){String k=keys.next(),v=hs.optString(k);if(k.indexOf('\r')<0&&k.indexOf('\n')<0&&v.indexOf('\r')<0&&v.indexOf('\n')<0)s.headers.put(k,v);}}
    sites.add(s);
   }return sites;

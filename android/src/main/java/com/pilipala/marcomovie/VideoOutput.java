@@ -2,12 +2,19 @@ package com.pilipala.marcomovie;
 
 import android.content.Context;
 import android.graphics.SurfaceTexture;
+import android.graphics.Bitmap;
+import android.graphics.Canvas;
+import android.graphics.Paint;
+import android.graphics.Rect;
+import android.os.Handler;
+import android.os.Looper;
 import android.os.Build;
 import android.view.*;
 import android.widget.FrameLayout;
 
 /** SurfaceView preserves the decoder's HDR output; TextureView remains an explicit fallback. */
-final class VideoOutput extends FrameLayout {
+final class VideoOutput extends FrameLayout
+        implements com.pilipala.glass.GlassworkSurface.FrameSource {
     interface Listener {
         void available(Surface surface);
 
@@ -17,6 +24,13 @@ final class VideoOutput extends FrameLayout {
     private Listener listener;
     private Surface current;
     private final TextureView texture;
+    private SurfaceView surfaceView;
+    private Bitmap glassFrame;
+    private boolean framePending, advancing;
+    private long frameAt;
+    private int frameGeneration;
+    private final java.util.ArrayList<Runnable> frameWaiters = new java.util.ArrayList<>();
+    private final Paint glassPaint = new Paint(Paint.FILTER_BITMAP_FLAG);
 
     VideoOutput(Context context, boolean compatible) {
         super(context);
@@ -44,6 +58,7 @@ final class VideoOutput extends FrameLayout {
         } else {
             texture = null;
             SurfaceView surface = new SurfaceView(context);
+            surfaceView = surface;
             addView(surface, new LayoutParams(-1, -1));
             surface.getHolder()
                     .addCallback(
@@ -73,6 +88,10 @@ final class VideoOutput extends FrameLayout {
     }
 
     private void gone() {
+        frameGeneration++;
+        glassFrame = null;
+        framePending = false;
+        finishGlassFrame();
         Surface old = current;
         current = null;
         if (listener != null) listener.destroyed();
@@ -89,5 +108,101 @@ final class VideoOutput extends FrameLayout {
 
     void picture(int preset) {
         if (texture != null) PlaybackEffects.picture(texture, preset);
+    }
+
+    void setFrameAdvancing(boolean value) {
+        if (advancing == value) return;
+        advancing = value;
+        com.pilipala.glass.GlassworkSurface.invalidateBackdrop(this);
+    }
+
+    public boolean glassFrameAdvancing() {
+        return advancing && current != null;
+    }
+
+    /** All visible controls share one bounded readback per 100 ms. */
+    public void prepareGlassFrame(Runnable ready) {
+        long now = android.os.SystemClock.uptimeMillis();
+        if (current == null
+                || !current.isValid()
+                || getWidth() <= 0
+                || getHeight() <= 0
+                || (frameAt > 0 && now - frameAt < 100)) {
+            ready.run();
+            return;
+        }
+        frameWaiters.add(ready);
+        if (framePending) return;
+        framePending = true;
+        final int token = frameGeneration;
+        double scale =
+                Math.min(
+                        1,
+                        Math.min(
+                                320.0 / Math.max(getWidth(), getHeight()),
+                                Math.sqrt(57600.0 / ((double) getWidth() * getHeight()))));
+        final Bitmap frame =
+                Bitmap.createBitmap(
+                        Math.max(1, (int) (getWidth() * scale)),
+                        Math.max(1, (int) (getHeight() * scale)),
+                        Bitmap.Config.ARGB_8888);
+        if (texture != null) {
+            try {
+                glassFrame = texture.getBitmap(frame);
+                frameAt = now;
+            } catch (RuntimeException unavailable) {
+                frame.recycle();
+                glassFrame = null;
+            }
+            frameAt = now;
+            framePending = false;
+            finishGlassFrame();
+        } else if (Build.VERSION.SDK_INT >= 24 && surfaceView != null) {
+            try {
+                PixelCopy.request(
+                        surfaceView,
+                        frame,
+                        result -> {
+                            if (token != frameGeneration) {
+                                frame.recycle();
+                                return;
+                            }
+                            glassFrame = result == PixelCopy.SUCCESS ? frame : null;
+                            if (glassFrame == null) frame.recycle();
+                            frameAt = android.os.SystemClock.uptimeMillis();
+                            framePending = false;
+                            finishGlassFrame();
+                        },
+                        new Handler(Looper.getMainLooper()));
+            } catch (RuntimeException unavailable) {
+                frame.recycle();
+                glassFrame = null;
+                frameAt = now;
+                framePending = false;
+                finishGlassFrame();
+            }
+        } else {
+            frame.recycle();
+            framePending = false;
+            finishGlassFrame();
+        }
+    }
+
+    private void finishGlassFrame() {
+        java.util.ArrayList<Runnable> callbacks = new java.util.ArrayList<>(frameWaiters);
+        frameWaiters.clear();
+        for (Runnable callback : callbacks) callback.run();
+    }
+
+    @Override
+    public void draw(Canvas canvas) {
+        if (com.pilipala.glass.GlassworkSurface.isCapturingBackdrop()) {
+            if (glassFrame != null && !glassFrame.isRecycled())
+                canvas.drawBitmap(
+                        glassFrame, null, new Rect(0, 0, getWidth(), getHeight()), glassPaint);
+            else canvas.drawColor(com.pilipala.glass.GlassworkMaterial.DARK_TINT);
+            return;
+        }
+        super.draw(canvas);
     }
 }

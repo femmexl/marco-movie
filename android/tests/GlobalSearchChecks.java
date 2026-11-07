@@ -1,5 +1,7 @@
 package com.pilipala.marcomovie;
 
+import java.util.concurrent.atomic.AtomicReference;
+
 import java.io.*;
 import java.nio.file.*;
 import java.util.*;
@@ -236,6 +238,55 @@ public final class GlobalSearchChecks {
             Thread.sleep(10);
         }
         check(!SearchCoordinator.isSiteWedged("stuck-0"), "wedged site recovers once call exits");
+
+        // A full plugin isolation budget must not starve host-controlled CMS I/O.
+        CountDownLatch releaseCapacity = new CountDownLatch(1);
+        CountDownLatch capacityTimedOut = new CountDownLatch(30);
+        List<Cms.Site> capacitySites = new ArrayList<>();
+        for (int i = 0; i < 30; i++) capacitySites.add(site("capacity-" + i));
+        SearchCoordinator capacity =
+                new SearchCoordinator(
+                        (s, q) -> {
+                            while (releaseCapacity.getCount() > 0) {
+                                try {
+                                    releaseCapacity.await(20, TimeUnit.MILLISECONDS);
+                                } catch (InterruptedException ignored) {
+                                }
+                            }
+                            return Collections.emptyList();
+                        },
+                        (s, v, o) -> capacityTimedOut.countDown(),
+                        50,
+                        3000);
+        capacity.start(capacitySites, "capacity");
+        try {
+            check(
+                    capacityTimedOut.await(3, TimeUnit.SECONDS),
+                    "plugin capacity test reached deadlines");
+            Cms.Site httpSite = site("healthy-http-at-capacity");
+            httpSite.type = 1;
+            httpSite.api = "https://fixture.example/api";
+            CountDownLatch httpDone = new CountDownLatch(1);
+            AtomicReference<SearchCoordinator.Outcome> httpOutcome = new AtomicReference<>();
+            SearchCoordinator http =
+                    new SearchCoordinator(
+                            (s, q) -> Collections.singletonList(video("http-result")),
+                            (s, v, o) -> {
+                                httpOutcome.set(o);
+                                httpDone.countDown();
+                            },
+                            300,
+                            1000);
+            http.start(Collections.singletonList(httpSite), "healthy");
+            check(
+                    httpDone.await(1, TimeUnit.SECONDS)
+                            && httpOutcome.get() == SearchCoordinator.Outcome.RESULT,
+                    "healthy CMS survives exhausted plugin pool");
+            http.close();
+        } finally {
+            capacity.close();
+            releaseCapacity.countDown();
+        }
 
         System.out.println(
                 "OK "

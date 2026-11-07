@@ -22,6 +22,25 @@ public final class UpdateLayoutChecks {
                 urls[1].equals(
                         "https://github.com/Pilipala9919/MarcoMovie/releases/download/v0.4.12-preview/MarcoMovie-0.4.12-preview.apk"),
                 "official path");
+        String[] mobileUrls = UpdatePolicy.downloads("0.4.12", true);
+        for (String url : mobileUrls) {
+            check(url.endsWith("-mobile.apk"), "mobile route stays mobile");
+            UpdatePolicy.validate(25, "0.4.12", 23, 1000, hash, url, true, "preview", true);
+            boolean rejected = false;
+            try {
+                UpdatePolicy.validate(25, "0.4.12", 23, 1000, hash, url, true, "preview", false);
+            } catch (Exception expected) {
+                rejected = true;
+            }
+            check(rejected, "TV refuses mobile artifact");
+        }
+        boolean rejectedTv = false;
+        try {
+            UpdatePolicy.validate(25, "0.4.12", 23, 1000, hash, urls[0], true, "preview", true);
+        } catch (Exception expected) {
+            rejectedTv = true;
+        }
+        check(rejectedTv, "mobile refuses TV artifact");
         for (String url : urls) {
             check(UpdatePolicy.apkUrl(url), "allowed APK");
             UpdatePolicy.validate(25, "0.4.12", 23, 1000, hash, url, true, "preview");

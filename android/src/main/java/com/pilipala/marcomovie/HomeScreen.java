@@ -27,7 +27,7 @@ final class HomeScreen {
     LinearLayout content;
     CategoryFlow filters;
     HomeAmbient ambient;
-    TextView status, source, more, allHistory;
+    TextView status, source, more, earlier, allHistory;
     int ticket, request, posterWidth, gridEpoch;
     Runnable pendingGrid;
 
@@ -37,6 +37,13 @@ final class HomeScreen {
     boolean busy;
     Snapshot snapshot;
     State state;
+    FrameLayout retainedRoot;
+    LinearLayout retainedBody;
+    android.widget.ScrollView retainedScroll;
+    HomeDock retainedDock;
+    int retainedWidth, retainedHeight, retainedEngineEpoch;
+    float retainedFontScale;
+    Map<String, Object> retainedAppearance;
 
     static final class Snapshot {
         final long time = System.currentTimeMillis();
@@ -44,6 +51,7 @@ final class HomeScreen {
         final List<Cms.Category> categories;
         final String skip;
         final int pages;
+        String filterSchema = "{}";
 
         Snapshot(List<Cms.Video> videos, List<Cms.Category> categories, String skip, int pages) {
             this.videos = videos;
@@ -56,9 +64,12 @@ final class HomeScreen {
     /** Navigation-entry state survives detail/back without changing the active category. */
     static final class State {
         String site, category = "";
+        int engineEpoch;
         List<Cms.Video> videos = new ArrayList<>();
-        int page = 1, pages = 1;
+        int page = 1, pages = 1, windowStart = 0;
         boolean ready, initialized;
+        Snapshot snapshot;
+        final Map<String, String> selectedFilters = new LinkedHashMap<>();
 
         State(String key) {
             site = key;
@@ -86,8 +97,9 @@ final class HomeScreen {
         ticket = a.generation;
         if (a.current != null) a.current.home = true;
         state = a.current == null ? null : a.current.homeState;
-        if (state == null || !site.key.equals(state.site)) {
+        if (state == null || !site.key.equals(state.site) || state.engineEpoch != a.engineEpoch) {
             state = new State(site.key);
+            state.engineEpoch = a.engineEpoch;
             if (a.current != null) a.current.homeState = state;
         }
         boolean bottomDock = a.useBottomDock();
@@ -128,6 +140,13 @@ final class HomeScreen {
         status = a.text("正在整理片单…", 13, MainActivity.MUTED);
         status.setPadding(a.dp(4), a.dp(12), 0, a.dp(12));
         a.body.addView(status);
+        earlier =
+                pill(
+                        "查看前面的影片",
+                        "home-earlier",
+                        () -> showWindow(Math.max(0, state.windowStart - windowSize())));
+        earlier.setVisibility(View.GONE);
+        a.body.addView(earlier, new LinearLayout.LayoutParams(a.dp(180), a.dp(40)));
         content = a.vertical();
         content.setClipChildren(false);
         content.setClipToPadding(false);
@@ -141,6 +160,10 @@ final class HomeScreen {
                                 loadHome();
                                 return;
                             }
+                            if (windowEnd() < state.videos.size()) {
+                                showWindow(state.windowStart + windowSize());
+                                return;
+                            }
                             loadCategory(!state.ready);
                         });
         LinearLayout footer = a.row();
@@ -152,11 +175,84 @@ final class HomeScreen {
         a.body.addView(footer);
         more.setVisibility(View.GONE);
         wireNavigation();
-        Snapshot saved = a.homeData.get(site.key);
-        if (saved != null && System.currentTimeMillis() - saved.time < 300000) {
+        retainedRoot = a.root;
+        retainedBody = a.body;
+        retainedScroll = a.scroll;
+        retainedDock = a.homeDock;
+        retainedWidth = a.windowWidth();
+        retainedHeight = a.windowHeight();
+        retainedFontScale = a.getResources().getConfiguration().fontScale;
+        retainedEngineEpoch = a.engineEpoch;
+        retainedAppearance = appearance();
+        if (a.current != null) a.current.retainedHome = this;
+        Snapshot saved = state.snapshot != null ? state.snapshot : a.homeData.get(site.key);
+        if (saved != null
+                && (state.snapshot != null || System.currentTimeMillis() - saved.time < 300000)) {
             snapshot = saved;
             renderSnapshot();
         } else loadHome();
+    }
+
+    Map<String, Object> appearance() {
+        Map<String, Object> values = new LinkedHashMap<>();
+        Map<String, ?> prefs = a.prefs.getAll();
+        for (String key :
+                new String[] {
+                    Prefs.HOME_COLUMNS,
+                    Prefs.HOME_ROWS,
+                    Prefs.HOME_SECTIONS,
+                    Prefs.HOME_AMBIENT,
+                    Prefs.WALLPAPER_ENABLED,
+                    Prefs.WALLPAPER_DIM,
+                    Prefs.REDUCED,
+                    Prefs.REDUCED_TRANSPARENCY,
+                    Prefs.UI_SCALE_PERCENT
+                }) values.put(key, prefs.get(key));
+        return values;
+    }
+
+    /** Reattach the exact home tree after detail/playback, without a catalogue request. */
+    boolean resume() {
+        if (retainedRoot == null
+                || state == null
+                || !state.ready
+                || busy
+                || retainedWidth != a.windowWidth()
+                || retainedHeight != a.windowHeight()
+                || retainedFontScale != a.getResources().getConfiguration().fontScale
+                || retainedEngineEpoch != a.engineEpoch
+                || !appearance().equals(retainedAppearance)
+                || !site.key.equals(a.prefs.getString(Prefs.SELECTED_SITE, ""))) return false;
+        a.preparePage(true);
+        ticket = a.generation;
+        request++;
+        cancelGrid();
+        a.root = retainedRoot;
+        a.body = retainedBody;
+        a.scroll = retainedScroll;
+        a.homeDock = retainedDock;
+        a.homeAmbient = ambient;
+        a.setContentView(retainedRoot);
+        int drawn = state.windowStart;
+        for (List<View> row : rows) drawn += row.size();
+        if (drawn < windowEnd()) appendCards(drawn, gridEpoch, true);
+        resumeMissingPosters(retainedRoot);
+        updateMore();
+        wireNavigation();
+        return true;
+    }
+
+    void resumeMissingPosters(View view) {
+        if (view instanceof ImageView
+                && ((ImageView) view).getDrawable() == null
+                && view.getTag() instanceof String) {
+            a.poster((String) view.getTag(), (ImageView) view);
+        }
+        if (view instanceof android.view.ViewGroup) {
+            android.view.ViewGroup group = (android.view.ViewGroup) view;
+            for (int i = 0; i < group.getChildCount(); i++)
+                resumeMissingPosters(group.getChildAt(i));
+        }
     }
 
     void loadHome() {
@@ -192,6 +288,7 @@ final class HomeScreen {
                         }
                         Snapshot result =
                                 new Snapshot(list.videos, categories, skip, list.pageCount);
+                        result.filterSchema = raw;
                         a.ui.post(
                                 () -> {
                                     a.prefs.edit().putString(Prefs.LOADING_SITE, "").apply();
@@ -342,6 +439,7 @@ final class HomeScreen {
     }
 
     void renderSnapshot() {
+        state.snapshot = snapshot;
         boolean first = !state.initialized;
         if (first) {
             state.initialized = true;
@@ -397,8 +495,94 @@ final class HomeScreen {
                     (v, f) -> outline(extra, f, 17, extra.isSelected() ? 0xffededf2 : 0xff24242b));
             addTabView(extra);
         }
+        addTabView(pill("筛选", "home-filters", this::showFilters));
         updateTabs();
         wireNavigation();
+    }
+
+    List<VideoFilters.Definition> filterDefinitions() {
+        String category = state.category;
+        if (category.isEmpty() && !snapshot.categories.isEmpty())
+            category = snapshot.categories.get(0).id;
+        List<VideoFilters.Definition> definitions =
+                VideoFilters.definitions(snapshot.filterSchema, category, snapshot.videos);
+        if (site.supported())
+            for (VideoFilters.Definition def : definitions) {
+                if (!VideoFilters.allowedKey(def.key)) def.remote = false;
+            }
+        return definitions;
+    }
+
+    void showFilters() {
+        if (snapshot == null) return;
+        List<VideoFilters.Definition> definitions = filterDefinitions();
+        String[] labels = new String[definitions.size() + 1];
+        for (int i = 0; i < definitions.size(); i++) {
+            VideoFilters.Definition def = definitions.get(i);
+            labels[i] = def.label + "：" + def.labelFor(state.selectedFilters.get(def.dimension));
+        }
+        labels[definitions.size()] = "清除全部筛选";
+        new AppDialog.Builder(a)
+                .setTitle("影视筛选")
+                .wrapChoices()
+                .setItems(
+                        labels,
+                        (dialog, index) -> {
+                            if (index == definitions.size()) {
+                                if (!state.selectedFilters.isEmpty()) {
+                                    state.selectedFilters.clear();
+                                    applyFilters();
+                                }
+                                return;
+                            }
+                            VideoFilters.Definition def = definitions.get(index);
+                            String[] options = new String[def.choices.size()];
+                            int checked = 0;
+                            for (int n = 0; n < options.length; n++) {
+                                options[n] = def.choices.get(n).label;
+                                if (def.choices
+                                        .get(n)
+                                        .value
+                                        .equals(state.selectedFilters.get(def.dimension)))
+                                    checked = n;
+                            }
+                            new AppDialog.Builder(a)
+                                    .setTitle(def.label + (def.remote ? "" : " · 按影片资料筛选"))
+                                    .wrapChoices()
+                                    .setSingleChoiceItems(
+                                            options,
+                                            checked,
+                                            (choiceDialog, n) -> {
+                                                String value = def.choices.get(n).value;
+                                                if (value.isEmpty())
+                                                    state.selectedFilters.remove(def.dimension);
+                                                else
+                                                    state.selectedFilters.put(def.dimension, value);
+                                                applyFilters();
+                                            })
+                                    .setNegativeButton("取消", null)
+                                    .show();
+                        })
+                .setNegativeButton("关闭", null)
+                .show();
+    }
+
+    void applyFilters() {
+        String category = state.category;
+        if (category.isEmpty()
+                && !state.selectedFilters.isEmpty()
+                && !snapshot.categories.isEmpty()) {
+            category = snapshot.categories.get(0).id;
+        }
+        // A new filter starts at page one; detail/back keeps this exact state.
+        state.category = category;
+        state.ready = false;
+        choose(category, true);
+        View filter = filters.findViewWithTag("home-filters");
+        if (filter != null) {
+            if (a.current != null) a.current.focus = "home-filters";
+            filter.requestFocus();
+        }
     }
 
     void addTab(String label, String id, int index) {
@@ -438,7 +622,13 @@ final class HomeScreen {
         for (View v : tabs) {
             TextView b = (TextView) v;
             if (tabIds.get(b) != null) styleTab(b);
-            else {
+            else if ("home-filters".equals(b.getTag())) {
+                b.setText(
+                        state.selectedFilters.isEmpty()
+                                ? "筛选"
+                                : "筛选 · " + state.selectedFilters.size());
+                b.setContentDescription("类型、国家地区、年份筛选");
+            } else {
                 boolean hidden = false;
                 String name = "更多分类";
                 for (int i = 4; i < snapshot.categories.size(); i++)
@@ -465,7 +655,7 @@ final class HomeScreen {
     }
 
     View selectedTab() {
-        for (View v : tabs) if (v.isSelected()) return v;
+        for (View v : tabs) if (tabIds.containsKey(v) && v.isSelected()) return v;
         return tabs.isEmpty() ? source : tabs.get(0);
     }
 
@@ -474,9 +664,11 @@ final class HomeScreen {
         a.cancelPageRequests();
         request++;
         busy = false;
+        if (!state.category.equals(category)) state.selectedFilters.clear();
         state.category = category;
         state.ready = false;
         state.videos.clear();
+        state.windowStart = 0;
         state.page = 1;
         state.pages = 1;
         pendingFocus = null;
@@ -495,7 +687,9 @@ final class HomeScreen {
                     new Rect(0, -a.dp(8), filters.getWidth(), filters.getHeight()), false);
         }
         if (category.isEmpty()) {
-            state.videos.addAll(snapshot.videos);
+            state.videos.addAll(
+                    VideoFilters.apply(
+                            snapshot.videos, filterDefinitions(), state.selectedFilters));
             state.pages = snapshot.skip.isEmpty() ? 1 : snapshot.pages;
             state.ready = true;
             drawGrid(false);
@@ -510,6 +704,9 @@ final class HomeScreen {
         busy = true;
         int token = ++request;
         int page = first ? 1 : state.page + 1;
+        List<VideoFilters.Definition> definitions = filterDefinitions();
+        Map<String, String> selections = new LinkedHashMap<>(state.selectedFilters);
+        Map<String, String> remoteFilters = VideoFilters.remoteValues(definitions, selections);
         status.setVisibility(first ? View.VISIBLE : View.GONE);
         status.setText("正在读取分类…");
         more.setText("正在加载…");
@@ -517,8 +714,12 @@ final class HomeScreen {
         a.submitPage(
                 () -> {
                     try {
-                        Cms.Listing list = Cms.listing(a.engine(site).category(category, page));
+                        Cms.Listing list =
+                                Cms.listing(a.engine(site).category(category, page, remoteFilters));
                         clean(list.videos);
+                        int received = list.videos.size();
+                        List<Cms.Video> matching =
+                                VideoFilters.apply(list.videos, definitions, selections);
                         a.ui.post(
                                 () -> {
                                     if (!active() || token != request) return;
@@ -528,35 +729,27 @@ final class HomeScreen {
                                     Set<String> ids = new HashSet<>();
                                     for (Cms.Video v : state.videos) ids.add(v.id);
                                     int added = 0;
-                                    for (Cms.Video v : list.videos)
+                                    for (Cms.Video v : matching)
                                         if (ids.add(v.id)) {
                                             state.videos.add(v);
                                             added++;
                                         }
-                                    boolean trimmedWindow = false;
+                                    int oldWindow = state.windowStart;
                                     int focusIndex = previous;
-                                    if (state.videos.size() > MAX_RETAINED_CARDS) {
-                                        int overflow = state.videos.size() - MAX_RETAINED_CARDS;
-                                        int drop = ((overflow + COLUMNS - 1) / COLUMNS) * COLUMNS;
-                                        drop =
-                                                Math.min(
-                                                        drop,
-                                                        Math.max(0, state.videos.size() - added));
-                                        if (drop > 0) {
-                                            state.videos.subList(0, drop).clear();
-                                            focusIndex = Math.max(0, previous - drop);
-                                            trimmedWindow = true;
-                                        }
+                                    if (added > 0 && previous >= windowEnd()) {
+                                        state.windowStart =
+                                                (previous / windowSize()) * windowSize();
                                     }
+                                    boolean changedWindow = oldWindow != state.windowStart;
                                     state.page = page;
                                     state.pages =
-                                            added == 0 ? page : Math.max(page, list.pageCount);
+                                            received == 0 ? page : Math.max(page, list.pageCount);
                                     state.ready = true;
                                     // Keep focus on the button until the first new card exists,
                                     // so focus never falls back to the category tabs at the top.
                                     pendingFocus =
                                             !first && focusMore ? "home-video:" + focusIndex : null;
-                                    drawGrid(!first && !trimmedWindow);
+                                    drawGrid(!first && !changedWindow);
                                     if (first
                                             && a.current != null
                                             && a.current.focus != null
@@ -612,18 +805,40 @@ final class HomeScreen {
         rows.clear();
     }
 
+    int windowSize() {
+        return Math.max(COLUMNS, (MAX_RETAINED_CARDS / COLUMNS) * COLUMNS);
+    }
+
+    int windowEnd() {
+        return Math.min(state.videos.size(), state.windowStart + windowSize());
+    }
+
+    void showWindow(int start) {
+        if (busy || start < 0 || start >= state.videos.size()) return;
+        state.windowStart = start;
+        pendingFocus = "home-video:" + start;
+        if (a.current != null) a.current.focus = pendingFocus;
+        drawGrid(false);
+        a.smoothHomeScroll(0);
+    }
+
     void drawGrid(boolean append) {
         cancelGrid();
-        int existing = 0;
+        int existing = state.windowStart;
         for (List<View> row : rows) existing += row.size();
         if (!append) {
             clearGrid();
-            existing = 0;
+            existing = state.windowStart;
         }
-        if (existing < state.videos.size())
-            a.learnTitles(state.videos.subList(existing, state.videos.size()));
-        status.setText("这个分类暂无内容，可切换其他分类或使用全局搜索。");
-        status.setVisibility(state.videos.isEmpty() ? View.VISIBLE : View.GONE);
+        earlier.setVisibility(state.windowStart > 0 ? View.VISIBLE : View.GONE);
+        if (existing < windowEnd()) a.learnTitles(state.videos.subList(existing, windowEnd()));
+        status.setText(
+                state.selectedFilters.isEmpty()
+                        ? "这个分类暂无内容，可切换其他分类或使用全局搜索。"
+                        : "当前已读取的影片没有匹配结果，可继续加载或调整筛选。");
+        boolean localFiltering = VideoFilters.hasLocal(filterDefinitions(), state.selectedFilters);
+        if (localFiltering && !state.videos.isEmpty()) status.setText("按片源已提供的影片资料筛选，可继续加载更多结果。");
+        status.setVisibility(state.videos.isEmpty() || localFiltering ? View.VISIBLE : View.GONE);
         // Hiding the focused button would hand focus to the first tab and jump to the top.
         if (pendingFocus == null || !more.hasFocus()) more.setVisibility(View.GONE);
         appendCards(existing, gridEpoch, !append);
@@ -663,8 +878,8 @@ final class HomeScreen {
 
     /** Shows or hides "加载更多" without ever hiding it while it still holds focus. */
     void updateMore() {
-        more.setText("加载更多");
-        boolean hasMore = state.page < state.pages;
+        more.setText(windowEnd() < state.videos.size() ? "查看后面的影片" : "加载更多");
+        boolean hasMore = windowEnd() < state.videos.size() || state.page < state.pages;
         if (hasMore || !more.hasFocus()) more.setVisibility(hasMore ? View.VISIBLE : View.GONE);
     }
 
@@ -673,7 +888,7 @@ final class HomeScreen {
         if (!active() || epoch != gridEpoch) return;
         int end = start;
         long batchStarted = System.nanoTime();
-        for (int index = start; index < state.videos.size() && index < start + 4; index++) {
+        for (int index = start; index < windowEnd() && index < start + 4; index++) {
             int column = index % COLUMNS;
             LinearLayout row;
             List<View> focusRow;
@@ -703,9 +918,9 @@ final class HomeScreen {
             end = index + 1;
             if (System.nanoTime() - batchStarted >= 3000000L) break;
         }
-        wireNavigation(Math.max(0, start / COLUMNS - 1));
+        wireNavigation(Math.max(0, (start - state.windowStart) / COLUMNS - 1));
         resolvePendingFocus(false);
-        if (end < state.videos.size()) {
+        if (end < windowEnd()) {
             final int next = end;
             pendingGrid = () -> appendCards(next, epoch, restore);
             Runnable nextBatch = pendingGrid;
@@ -840,9 +1055,11 @@ final class HomeScreen {
                 tab.setNextFocusDownId(
                         r + 1 < filters.lines.size()
                                 ? filters.nearest(filters.lines.get(r + 1), tab).getId()
-                                : rows.isEmpty()
-                                        ? (more.isShown() ? more.getId() : tab.getId())
-                                        : rows.get(0).get(0).getId());
+                                : earlier.isShown()
+                                        ? earlier.getId()
+                                        : rows.isEmpty()
+                                                ? (more.isShown() ? more.getId() : tab.getId())
+                                                : rows.get(0).get(0).getId());
             }
             if (a.homeDock != null && !line.isEmpty())
                 a.homeDock.rightEdge(line.get(line.size() - 1));
@@ -854,7 +1071,7 @@ final class HomeScreen {
                 View card = row.get(c);
                 card.setNextFocusUpId(
                         r == 0
-                                ? selectedTab().getId()
+                                ? (earlier.isShown() ? earlier.getId() : selectedTab().getId())
                                 : rows.get(r - 1)
                                         .get(Math.min(c, rows.get(r - 1).size() - 1))
                                         .getId());
@@ -866,12 +1083,15 @@ final class HomeScreen {
                                 : more.isShown() ? more.getId() : card.getId());
             }
         }
+        earlier.setNextFocusUpId(selectedTab().getId());
+        earlier.setNextFocusDownId(rows.isEmpty() ? more.getId() : rows.get(0).get(0).getId());
         more.setNextFocusUpId(
                 rows.isEmpty() ? selectedTab().getId() : rows.get(rows.size() - 1).get(0).getId());
         if (a.homeDock != null) {
             a.homeDock.rightEdge(source);
             a.homeDock.rightEdge(allHistory);
             a.homeDock.rightEdge(more);
+            a.homeDock.rightEdge(earlier);
             if (!tabs.isEmpty()) a.homeDock.rightEdge(tabs.get(tabs.size() - 1));
             for (int r = Math.max(0, firstRow); r < rows.size(); r++) {
                 List<View> row = rows.get(r);

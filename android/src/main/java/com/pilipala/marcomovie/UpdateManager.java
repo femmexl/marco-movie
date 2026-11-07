@@ -20,17 +20,18 @@ final class UpdateManager {
         final String version, url, sha, notes;
         final boolean preview;
 
-        Release(JSONObject o, String channel) throws Exception {
+        Release(JSONObject o, String channel, boolean mobile) throws Exception {
+            JSONObject artifact = mobile ? o.getJSONObject("mobile") : o;
             if (o.getInt("schema") != 1) throw new IOException("Unsupported feed");
             code = o.getInt("versionCode");
             minSdk = o.getInt("minSdk");
-            size = o.getLong("size");
+            size = artifact.getLong("size");
             version = o.getString("versionName");
-            url = o.getString("url");
-            sha = o.getString("sha256");
+            url = artifact.getString("url");
+            sha = artifact.getString("sha256");
             preview = o.getBoolean("prerelease");
             notes = o.optString("notes", "");
-            UpdatePolicy.validate(code, version, minSdk, size, sha, url, preview, channel);
+            UpdatePolicy.validate(code, version, minSdk, size, sha, url, preview, channel, mobile);
             if (notes.length() > 8000) throw new IOException("Notes too long");
         }
     }
@@ -92,7 +93,11 @@ final class UpdateManager {
                     .apply();
         prefs.edit().putInt("installed_code", code).apply();
         try {
-            available = new Release(new JSONObject(prefs.getString("metadata", "")), channel());
+            available =
+                    new Release(
+                            new JSONObject(prefs.getString("metadata", "")),
+                            channel(),
+                            mobileEdition());
         } catch (Exception ignored) {
         }
         if (available != null
@@ -106,6 +111,23 @@ final class UpdateManager {
             return c.getPackageManager().getPackageInfo(c.getPackageName(), 0).versionCode;
         } catch (Exception e) {
             return Integer.MAX_VALUE;
+        }
+    }
+
+    private boolean mobileEdition() {
+        return mobileEdition(context);
+    }
+
+    private static boolean mobileEdition(Context context) {
+        try {
+            android.content.pm.ApplicationInfo info =
+                    context.getPackageManager()
+                            .getApplicationInfo(
+                                    context.getPackageName(), PackageManager.GET_META_DATA);
+            return info.metaData != null
+                    && "mobile".equals(info.metaData.getString("com.pilipala.marcomovie.EDITION"));
+        } catch (PackageManager.NameNotFoundException e) {
+            throw new IllegalStateException("无法识别安装版本", e);
         }
     }
 
@@ -217,7 +239,7 @@ final class UpdateManager {
                 () -> {
                     try {
                         JSONObject data = readRelease(channel);
-                        Release r = new Release(data, channel);
+                        Release r = new Release(data, channel, mobileEdition());
                         if (cancel) throw new InterruptedIOException();
                         if (!UpdatePolicy.newer(r.code, installedCode(context))) {
                             clearOffer();
@@ -297,7 +319,7 @@ final class UpdateManager {
         try {
             Exception failure = null;
             boolean valid = false;
-            String[] sources = UpdatePolicy.downloads(r.version);
+            String[] sources = UpdatePolicy.downloads(r.version, mobileEdition());
             for (int source = 0; source < sources.length && !valid; source++) {
                 for (int attempt = 0; attempt < 2 && part.length() < r.size; attempt++) {
                     if (cancel) throw new InterruptedIOException();
@@ -385,7 +407,9 @@ final class UpdateManager {
                 Build.VERSION.SDK_INT >= 28
                         ? PackageManager.GET_SIGNING_CERTIFICATES | PackageManager.GET_SIGNATURES
                         : PackageManager.GET_SIGNATURES;
-        PackageInfo next = pm.getPackageArchiveInfo(file.getAbsolutePath(), flags);
+        PackageInfo next =
+                pm.getPackageArchiveInfo(
+                        file.getAbsolutePath(), flags | PackageManager.GET_META_DATA);
         PackageInfo current = pm.getPackageInfo(c.getPackageName(), flags);
         if (next == null
                 || !c.getPackageName().equals(next.packageName)
@@ -397,6 +421,13 @@ final class UpdateManager {
                         && (next.applicationInfo.minSdkVersion != r.minSdk
                                 || next.applicationInfo.minSdkVersion > Build.VERSION.SDK_INT)))
             throw new IOException("package identity or compatibility");
+        boolean nextMobile =
+                next.applicationInfo.metaData != null
+                        && "mobile"
+                                .equals(
+                                        next.applicationInfo.metaData.getString(
+                                                "com.pilipala.marcomovie.EDITION", "tv"));
+        if (nextMobile != mobileEdition(c)) throw new IOException("安装包类型不匹配");
         Set<String> a = packageSignatures(current), b = packageSignatures(next);
         if (a.isEmpty() || !a.equals(b)) throw new IOException("signer");
     }
@@ -476,7 +507,7 @@ final class UpdateManager {
             if (cancel) throw new InterruptedIOException();
             try {
                 JSONObject data = new JSONObject(new String(readFeed(address), "UTF-8"));
-                new Release(data, channel);
+                new Release(data, channel, mobileEdition());
                 return data;
             } catch (Exception e) {
                 failure = e;

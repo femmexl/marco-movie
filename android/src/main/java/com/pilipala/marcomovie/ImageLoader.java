@@ -50,7 +50,7 @@ final class ImageLoader {
 
     static void poster(MainActivity a, String address, ImageView image, boolean detail) {
         image.setTag(address);
-        if (!Cms.isHttp(address)) return;
+        if (!Cms.isHttp(address) && !address.startsWith("catpaw://")) return;
         final int ticket = a.generation;
         image.post(
                 () -> {
@@ -63,24 +63,26 @@ final class ImageLoader {
                     Bitmap cached = a.images.get(key);
                     if (cached != null) {
                         image.setImageBitmap(cached);
+                        com.pilipala.glass.GlassworkSurface.invalidateBackdrop(image);
                         return;
                     }
                     Bitmap preview = a.images.get(address);
                     if (preview != null) {
                         image.setImageBitmap(preview);
+                        com.pilipala.glass.GlassworkSurface.invalidateBackdrop(image);
                         if (!detail
                                 || (preview.getWidth() >= width && preview.getHeight() >= height))
                             return;
                     }
+                    final java.util.List<ImageView> owned = new java.util.ArrayList<>(2);
                     synchronized (IN_FLIGHT) {
                         java.util.List<ImageView> waiters = IN_FLIGHT.get(key);
                         if (waiters != null) {
                             if (!waiters.contains(image)) waiters.add(image);
                             return;
                         }
-                        java.util.List<ImageView> created = new java.util.ArrayList<>(2);
-                        created.add(image);
-                        IN_FLIGHT.put(key, created);
+                        owned.add(image);
+                        IN_FLIGHT.put(key, owned);
                     }
                     Future<?> request =
                             RequestScope.submit(
@@ -88,7 +90,8 @@ final class ImageLoader {
                                     () -> {
                                         if (ticket != a.generation) {
                                             synchronized (IN_FLIGHT) {
-                                                IN_FLIGHT.remove(key);
+                                                if (IN_FLIGHT.get(key) == owned)
+                                                    IN_FLIGHT.remove(key);
                                             }
                                             return;
                                         }
@@ -96,6 +99,10 @@ final class ImageLoader {
                                         try {
                                             Cms.ImageRequest source = Cms.imageRequest(address);
                                             String targetUrl = Cms.normalizeHttp(source.url);
+                                            if (targetUrl.startsWith("catpaw://"))
+                                                targetUrl =
+                                                        new com.pilipala.catpaw.CatPawHost(a)
+                                                                .resolve(targetUrl);
                                             if (targetUrl.contains("doubanio.com")) {
                                                 targetUrl =
                                                         targetUrl
@@ -122,6 +129,20 @@ final class ImageLoader {
                                                     source.headers.entrySet())
                                                 connection.setRequestProperty(
                                                         header.getKey(), header.getValue());
+                                            String fragment = new URL(targetUrl).getRef();
+                                            if (fragment != null
+                                                    && fragment.startsWith("mm-emby=")) {
+                                                connection.setInstanceFollowRedirects(false);
+                                                com.pilipala.emby.EmbyLibrary library =
+                                                        com.pilipala.emby.EmbyAccounts.open(
+                                                                a,
+                                                                "emby://account/"
+                                                                        + fragment.substring(8));
+                                                for (Map.Entry<String, String> h :
+                                                        library.imageHeaders(targetUrl).entrySet())
+                                                    connection.setRequestProperty(
+                                                            h.getKey(), h.getValue());
+                                            }
                                             connection.setConnectTimeout(7000);
                                             connection.setReadTimeout(8000);
                                             if (!source.headers.containsKey("User-Agent"))
@@ -173,7 +194,9 @@ final class ImageLoader {
                                                 final java.util.List<ImageView> targets;
                                                 synchronized (IN_FLIGHT) {
                                                     java.util.List<ImageView> removed =
-                                                            IN_FLIGHT.remove(key);
+                                                            IN_FLIGHT.get(key) == owned
+                                                                    ? IN_FLIGHT.remove(key)
+                                                                    : null;
                                                     targets =
                                                             removed == null
                                                                     ? java.util.Collections
@@ -190,6 +213,10 @@ final class ImageLoader {
                                                                         && address.equals(
                                                                                 target.getTag())) {
                                                                     target.setImageBitmap(bitmap);
+                                                                    com.pilipala.glass
+                                                                            .GlassworkSurface
+                                                                            .invalidateBackdrop(
+                                                                                    target);
                                                                 }
                                                             }
                                                         });
@@ -197,7 +224,8 @@ final class ImageLoader {
                                         } catch (Exception ignored) {
                                         } finally {
                                             synchronized (IN_FLIGHT) {
-                                                IN_FLIGHT.remove(key);
+                                                if (IN_FLIGHT.get(key) == owned)
+                                                    IN_FLIGHT.remove(key);
                                             }
                                             if (connection != null) {
                                                 RequestScope.detach(connection);

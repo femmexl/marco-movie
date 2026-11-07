@@ -184,9 +184,12 @@ public final class ReviewFixChecks {
                         && ImageDecodePolicy.cacheBytes(512) == 32 * 1024 * 1024,
                 "image memory cache budget scales within 10MB..32MB bounds");
 
-        check(Prefs.KEYS.length == 29, "backup settings key table has 29 entries");
+        check(Prefs.KEYS.length == 30, "backup settings key table includes reduced transparency");
         check(
                 Boolean.TRUE.equals(Prefs.sanitizeSetting(Prefs.AUTO_NEXT, true))
+                        && Boolean.TRUE.equals(
+                                Prefs.sanitizeSetting(Prefs.REDUCED_TRANSPARENCY, true))
+                        && Prefs.sanitizeSetting(Prefs.REDUCED_TRANSPARENCY, "true") == null
                         && Prefs.sanitizeSetting(Prefs.AUTO_NEXT, "true") == null
                         && Prefs.sanitizeSetting(Prefs.EXPERIMENTAL_CSP, true) == null
                         && Prefs.sanitizeSetting(null, true) == null,

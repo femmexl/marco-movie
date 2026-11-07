@@ -200,6 +200,7 @@ final class MobileShell {
                         .setTitle("导入或更新配置")
                         .setView(panel)
                         .setNegativeButton("取消", null)
+                        .setNeutralButton("连接 Emby", (d, w) -> EmbyEngine.connect(a))
                         .setPositiveButton(
                                 "导入输入内容",
                                 (d, w) -> {
@@ -283,15 +284,15 @@ final class MobileShell {
                                 } finally {
                                     conn.disconnect();
                                 }
-                                Cms.Config pkgConfig =
-                                        SourceController.extractZipPackage(a.getFilesDir(), bytes);
+                                LocalSourcePackage pkg =
+                                        LocalSourcePackage.open(a.getFilesDir(), bytes);
                                 a.ui.post(
                                         () -> {
                                             try {
-                                                a.saveConfig(pkgConfig, "");
+                                                a.saveConfig(pkg.config, pkg.origin);
                                                 a.toast(
                                                         "压缩包配置导入成功（共 "
-                                                                + pkgConfig.sites.size()
+                                                                + pkg.config.sites.size()
                                                                 + " 个片源）");
                                             } catch (Exception ex) {
                                                 a.toast("保存配置失败：" + a.message(ex));
@@ -299,7 +300,8 @@ final class MobileShell {
                                         });
                                 return;
                             } else {
-                                rawJson = Cms.fetch(origin, null);
+                                rawJson = SourceController.fetchImport(a, origin);
+                                origin = SourceController.importOrigin(origin);
                             }
                         }
                         try {
@@ -472,7 +474,7 @@ final class MobileShell {
         sitePill.setMaxWidth(maxSiteWidth);
         sitePill.setGravity(Gravity.CENTER);
         sitePill.setPadding(a.dp(11), a.dp(7), a.dp(11), a.dp(7));
-        sitePill.setBackground(glassBg(0xd4262e2b, 0xc41a211f, a.dp(999), a.dp(0.8f), 0x38ffffff));
+        a.glass(sitePill, 999);
         MobileDetailScreen.bindTouchFeedback(sitePill);
         sitePill.setOnClickListener(
                 v -> {
@@ -489,8 +491,7 @@ final class MobileShell {
         netdiskPill.setTypeface(null, Typeface.BOLD);
         netdiskPill.setGravity(Gravity.CENTER);
         netdiskPill.setPadding(a.dp(11), a.dp(7), a.dp(11), a.dp(7));
-        netdiskPill.setBackground(
-                glassBg(0xd4262e2b, 0xc41a211f, a.dp(999), a.dp(0.8f), 0x38ffffff));
+        a.glass(netdiskPill, 999);
         MobileDetailScreen.bindTouchFeedback(netdiskPill);
         netdiskPill.setOnClickListener(
                 v -> {
@@ -504,8 +505,7 @@ final class MobileShell {
         // Right 3: Circular Liquid Glass Search button (`nav-search`)
         FrameLayout searchCircle = new FrameLayout(a);
         searchCircle.setTag("nav-search");
-        searchCircle.setBackground(
-                glassBg(0xd4262e2b, 0xc41a211f, a.dp(999), a.dp(0.8f), 0x38ffffff));
+        a.glass(searchCircle, 999);
         MobileDetailScreen.bindTouchFeedback(searchCircle);
         searchCircle.setOnClickListener(v -> switchTab(1));
         NavGlyph searchGlyph = new NavGlyph(a, 1);
@@ -528,6 +528,7 @@ final class MobileShell {
                     private float downX;
                     private float downY;
                     private boolean sliding;
+                    private int pendingTab = -1;
 
                     @Override
                     public boolean onInterceptTouchEvent(android.view.MotionEvent ev) {
@@ -536,6 +537,7 @@ final class MobileShell {
                             downX = ev.getX();
                             downY = ev.getY();
                             sliding = false;
+                            pendingTab = -1;
                         } else if (action == android.view.MotionEvent.ACTION_MOVE) {
                             float delta =
                                     verticalRail
@@ -566,11 +568,14 @@ final class MobileShell {
                                                         count - 1,
                                                         (int) Math.floor((coord / span) * count)));
                                 int targetTab = DOCK_TAB_INDICES[slot];
-                                int currentDockTab = activeTab == 1 ? 0 : activeTab;
+                                int currentDockTab =
+                                        pendingTab >= 0
+                                                ? pendingTab
+                                                : (activeTab == 1 ? 0 : activeTab);
                                 if (targetTab != currentDockTab) {
                                     performHapticFeedback(
                                             android.view.HapticFeedbackConstants.KEYBOARD_TAP);
-                                    switchTab(targetTab);
+                                    pendingTab = targetTab;
                                 }
                             }
                             return true;
@@ -578,6 +583,9 @@ final class MobileShell {
                         if (action == android.view.MotionEvent.ACTION_UP
                                 || action == android.view.MotionEvent.ACTION_CANCEL) {
                             sliding = false;
+                            if (action == android.view.MotionEvent.ACTION_UP && pendingTab >= 0)
+                                switchTab(pendingTab);
+                            pendingTab = -1;
                             return true;
                         }
                         return super.onTouchEvent(ev);
@@ -587,7 +595,7 @@ final class MobileShell {
         bar.setTag("home-dock");
         bar.setGravity(Gravity.CENTER);
         bar.setPadding(a.dp(6), a.dp(6), a.dp(6), a.dp(6));
-        bar.setBackground(glassBg(0xde272f2d, 0xe8171d1b, a.dp(26), a.dp(1f), 0x48ffffff));
+        a.glass(bar, 26);
         bar.setElevation(a.dp(18));
 
         String[] navKeys = {"nav-home", "nav-search", "nav-live", "nav-favorites", "nav-settings"};
@@ -622,7 +630,11 @@ final class MobileShell {
         return bar;
     }
 
+    private int homeScrollY;
+    private ScrollView homeScroll;
+
     void switchTab(int index) {
+        if (activeTab == 0 && homeScroll != null) homeScrollY = homeScroll.getScrollY();
         activeTab = Math.max(0, Math.min(4, index));
         a.cancelPageRequests();
         // When on Search tab (1), highlight Home (0) in the 4-tab dock
@@ -676,6 +688,8 @@ final class MobileShell {
         }
 
         final ScrollView scrollView = new ScrollView(a);
+        homeScroll = scrollView;
+        scrollView.post(() -> scrollView.scrollTo(0, homeScrollY));
         scrollView.setFillViewport(true);
         scrollView.setVerticalScrollBarEnabled(false);
         scrollView.setClipToPadding(false);
@@ -1336,7 +1350,7 @@ final class MobileShell {
 
         TextView backBtn = a.text("‹", 22, Color.WHITE);
         backBtn.setGravity(Gravity.CENTER);
-        backBtn.setBackground(glassBg(0xd4262e2b, 0xc41a211f, a.dp(999), a.dp(0.8f), 0x38ffffff));
+        backBtn.setBackground(glassBg(0xb034343a, 0xc01e1e22, a.dp(999), a.dp(0.8f), 0x38ffffff));
         MobileDetailScreen.bindTouchFeedback(backBtn);
         backBtn.setOnClickListener(v -> switchTab(0));
         LinearLayout.LayoutParams backLp = new LinearLayout.LayoutParams(a.dp(38), a.dp(38));
@@ -1517,7 +1531,7 @@ final class MobileShell {
                     cachedSearchScrollY = 0;
 
                     List<Cms.Site> searchableSites = new ArrayList<>();
-                    for (Cms.Site s : a.config.sites) {
+                    for (Cms.Site s : SourcePreferences.prioritized(a, a.config.sites)) {
                         if (a.available(s) && s.searchable) searchableSites.add(s);
                     }
                     if (searchableSites.isEmpty()) {
@@ -2400,7 +2414,7 @@ final class MobileShell {
             TextView backBtn = a.text("‹", 22, Color.WHITE);
             backBtn.setGravity(Gravity.CENTER);
             backBtn.setBackground(
-                    glassBg(0xd4262e2b, 0xc41a211f, a.dp(999), a.dp(0.8f), 0x38ffffff));
+                    glassBg(0xb034343a, 0xc01e1e22, a.dp(999), a.dp(0.8f), 0x38ffffff));
             MobileDetailScreen.bindTouchFeedback(backBtn);
             backBtn.setOnClickListener(
                     v -> {
@@ -2568,6 +2582,21 @@ final class MobileShell {
                             a.recreate();
                         });
                 final boolean reduced = a.prefs.getBoolean(Prefs.REDUCED, false);
+                final boolean reducedTransparency =
+                        a.prefs.getBoolean(Prefs.REDUCED_TRANSPARENCY, false);
+                addSettingCard(
+                        body,
+                        4,
+                        "减少透明效果",
+                        reducedTransparency ? "已开启（使用实色面板）" : "已关闭（背景玻璃材质）",
+                        () -> {
+                            a.prefs
+                                    .edit()
+                                    .putBoolean(Prefs.REDUCED_TRANSPARENCY, !reducedTransparency)
+                                    .apply();
+                            com.pilipala.glass.GlassworkSurface.invalidateBackdrop(a.root);
+                            refreshInPlace.run();
+                        });
                 addSettingCard(
                         body,
                         4,
@@ -2630,115 +2659,23 @@ final class MobileShell {
         pageTitle.setTypeface(null, Typeface.BOLD);
         body.addView(pageTitle);
 
-        TextView pageSub = a.text("管理片源、账号授权、播放偏好与版本更新", 12.5f, 0xff8e959e);
-        pageSub.setPadding(0, a.dp(3), 0, a.dp(14));
-        body.addView(pageSub);
-
-        // Quick 2-pill bar for the two most common daily operations
-        LinearLayout quickRow = a.row();
-        quickRow.setGravity(Gravity.CENTER_VERTICAL);
-        TextView quickPaste = a.text("一键粘贴配置", 13, Color.WHITE);
-        quickPaste.setTypeface(null, Typeface.BOLD);
-        quickPaste.setGravity(Gravity.CENTER);
-        quickPaste.setPadding(a.dp(12), a.dp(10), a.dp(12), a.dp(10));
-        quickPaste.setBackground(a.bg(0xff0a84ff, 14));
-        MobileDetailScreen.bindTouchFeedback(quickPaste);
-        quickPaste.setOnClickListener(v -> pasteConfigFromClipboard(a));
-        LinearLayout.LayoutParams qpLp = new LinearLayout.LayoutParams(0, -2, 1f);
-        qpLp.rightMargin = a.dp(8);
-        quickRow.addView(quickPaste, qpLp);
-
-        TextView quickSite =
-                a.text(
-                        currentSite == null ? "选择默认片源" : "片源：" + currentSite.name,
-                        13,
-                        MainActivity.WHITE);
-        quickSite.setTypeface(null, Typeface.BOLD);
-        quickSite.setSingleLine(true);
-        quickSite.setEllipsize(TextUtils.TruncateAt.END);
-        quickSite.setGravity(Gravity.CENTER);
-        quickSite.setPadding(a.dp(12), a.dp(10), a.dp(12), a.dp(10));
-        quickSite.setBackground(glassBg(0xcc262e2b, 0xb81a211f, a.dp(14), a.dp(0.7f), 0x33ffffff));
-        MobileDetailScreen.bindTouchFeedback(quickSite);
-        quickSite.setOnClickListener(
-                v -> {
-                    if (a.config == null) showMobileImportDialog(a);
-                    else a.chooseSources();
-                });
-        quickRow.addView(quickSite, new LinearLayout.LayoutParams(0, -2, 1f));
-        body.addView(quickRow, new LinearLayout.LayoutParams(-1, -2));
         a.gap(body, 14);
-
-        // Primary Category Card 1: 片源与直播配置
-        String sourceSummary =
-                (currentSite != null
-                                ? "当前：" + currentSite.name
-                                : (a.config != null && !a.config.sites.isEmpty()
-                                        ? "已导入 " + a.config.sites.size() + " 个片源"
-                                        : "尚未导入配置"))
-                        + " · 支持 JSON / JS / PY / M3U / ZIP";
-        addSettingCard(
-                body,
-                1,
-                "片源与直播配置",
-                sourceSummary,
-                () -> {
-                    settingsSubPage = 1;
-                    sv.scrollTo(0, 0);
-                    refreshInPlace.run();
-                });
-
-        // Primary Category Card 2: 网盘与账号授权
-        addSettingCard(
-                body, 2, "网盘与账号授权", "夸克、UC、百度、阿里云盘与哔哩哔哩扫码登录", () -> AccountPanel.show(a, null));
-
-        // Primary Category Card 3: 播放、解码与字幕
-        int engine = a.prefs.getInt(Prefs.PLAYER_ENGINE, 0);
-        int decoder = a.prefs.getInt(Prefs.DECODER_MODE, 0);
-        String[] decShort = {"自动解码", "硬解优先", "软解优先"};
-        int subSize = Prefs.clampSubtitleSize(a.prefs.getInt(Prefs.SUBTITLE_SIZE_SP, 22));
-        String playSummary =
-                (engine == 0 ? "Media3 内核" : "系统播放器")
-                        + " · "
-                        + decShort[Math.max(0, Math.min(2, decoder))]
-                        + " · 字幕 "
-                        + subSize
-                        + " · 片头片尾调节";
-        addSettingCard(
-                body,
-                3,
-                "播放、解码与字幕",
-                playSummary,
-                () -> {
-                    settingsSubPage = 2;
-                    sv.scrollTo(0, 0);
-                    refreshInPlace.run();
-                });
-
-        // Primary Category Card 4: 界面外观与偏好
-        int scale = a.prefs.getInt(Prefs.UI_SCALE_PERCENT, 100);
-        addSettingCard(
-                body,
-                4,
-                "界面外观与偏好",
-                "画面缩放 " + scale + "% · 动画动效与搜索历史管理",
-                () -> {
-                    settingsSubPage = 3;
-                    sv.scrollTo(0, 0);
-                    refreshInPlace.run();
-                });
-
-        // Primary Category Card 5: 备份、更新与诊断
-        addSettingCard(
-                body,
-                5,
-                "备份、更新与诊断",
-                "版本 " + UpdateManager.installedVersion(a) + " 正式版 · 配置备份恢复与运行日志",
-                () -> {
-                    settingsSubPage = 4;
-                    sv.scrollTo(0, 0);
-                    refreshInPlace.run();
-                });
+        final String[] categories = {"片源与直播配置", "播放、解码与字幕", "界面外观与偏好", "备份、更新与诊断"};
+        final int[] icons = {1, 3, 4, 5};
+        for (int i = 0; i < categories.length; i++) {
+            final int page = i + 1;
+            addSettingCard(
+                    body,
+                    icons[i],
+                    categories[i],
+                    "",
+                    () -> {
+                        settingsSubPage = page;
+                        sv.scrollTo(0, 0);
+                        refreshInPlace.run();
+                    });
+        }
+        addSettingCard(body, 2, "网盘与账号授权", "", () -> AccountPanel.show(a, null));
     }
 
     private void addSectionHeader(LinearLayout parent, String title) {
@@ -2771,7 +2708,7 @@ final class MobileShell {
         s.setPadding(0, a.dp(3), 0, 0);
         s.setSingleLine(true);
         s.setEllipsize(TextUtils.TruncateAt.END);
-        textCol.addView(s);
+        if (!subtitle.isEmpty()) textCol.addView(s);
 
         row.addView(textCol, new LinearLayout.LayoutParams(0, -2, 1));
         row.addView(a.text("›", 20, MainActivity.MUTED));

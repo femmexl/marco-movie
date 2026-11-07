@@ -64,7 +64,9 @@ final class PhoneConfigDialog {
                     new ConfigTransferServer(
                             address -> {
                                 Cms.Config config =
-                                        Cms.parseConfig(Cms.fetch(address, null), address);
+                                        Cms.parseConfig(
+                                                SourceController.fetchImport(a, address),
+                                                SourceController.importOrigin(address));
                                 CountDownLatch applied = new CountDownLatch(1);
                                 AtomicReference<Exception> failure = new AtomicReference<>();
                                 a.ui.post(
@@ -74,7 +76,9 @@ final class PhoneConfigDialog {
                                                         || a.isFinishing()
                                                         || a.phoneConfig != this)
                                                     throw new java.io.IOException("Session closed");
-                                                a.saveConfig(config, address);
+                                                a.saveConfig(
+                                                        config,
+                                                        SourceController.importOrigin(address));
                                                 finished = true;
                                                 if (dialog != null) dialog.dismiss();
                                             } catch (Exception e) {
@@ -110,6 +114,14 @@ final class PhoneConfigDialog {
             url.setGravity(android.view.Gravity.CENTER);
             url.setPadding(0, a.dp(10), 0, 0);
             panel.addView(url);
+            android.widget.Button emby = new android.widget.Button(a);
+            emby.setText("连接 Emby");
+            emby.setOnClickListener(
+                    v -> {
+                        if (dialog != null) dialog.dismiss();
+                        EmbyEngine.connect(a);
+                    });
+            panel.addView(emby);
             a.gap(panel, 6);
             panel.addView(a.text("二维码有效 5 分钟 · 关闭后停止接收", 12, MainActivity.MUTED));
             dialog =

@@ -6,6 +6,11 @@ public interface SourceEngine {
 
     String category(String categoryId, int page) throws Exception;
 
+    default String category(String categoryId, int page, java.util.Map<String, String> filters)
+            throws Exception {
+        return category(categoryId, page);
+    }
+
     String detail(String videoId) throws Exception;
 
     String search(String keyword, int page) throws Exception;

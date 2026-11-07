@@ -1,6 +1,7 @@
 package com.pilipala.marcomovie;
 
 import org.json.*;
+import com.pilipala.source.Warehouse;
 import java.io.*;
 import java.net.*;
 import java.util.*;
@@ -14,6 +15,8 @@ public final class Cms {
         public final List<Site> sites = new ArrayList<>();
         public String raw;
         public String spider;
+        public String origin = "", warehouse = "";
+        public JSONArray depots = new JSONArray();
     }
 
     public static final class Site {
@@ -48,6 +51,7 @@ public final class Cms {
                 remarks,
                 year,
                 area,
+                genre,
                 actor,
                 director,
                 description,
@@ -137,15 +141,23 @@ public final class Cms {
                 + (u.getRef() != null ? "#" + u.getRef() : "");
     }
 
-    private static String resolve(String origin, String target) {
+    static String fileUri(java.io.File file) {
+        return "file://" + file.toURI().getRawPath();
+    }
+
+    static String resolve(String origin, String target) {
         if (target == null) return "";
         if (isHttp(target)
+                || target.isEmpty()
                 || target.startsWith("file://")
                 || target.startsWith("csp_")
                 || origin == null
                 || (!isHttp(origin) && !origin.startsWith("file://"))) return target;
         try {
-            return new URL(new URL(origin), target).toString();
+            URL resolved = new URL(new URL(origin), target);
+            return "file".equals(resolved.getProtocol()) && origin.startsWith("file://")
+                    ? fileUri(new java.io.File(resolved.toURI()))
+                    : resolved.toString();
         } catch (Exception e) {
             return target;
         }
@@ -211,26 +223,21 @@ public final class Cms {
             }
             if (looksLikePySpider(trimmed, origin)) {
                 String title = extractScriptTitle(trimmed, origin, "PY");
-                java.util.regex.Matcher cmsMatcher =
-                        java.util.regex.Pattern.compile(
-                                        "https?://[A-Za-z0-9._~:/?#\\[\\]@!$&()*+,;=%-]+/api\\.php/provide/vod/?")
-                                .matcher(trimmed);
                 JSONObject siteObj = new JSONObject();
                 siteObj.put(
                         "key",
                         "py_"
                                 + Math.abs(
-                                        (origin != null && !origin.isEmpty() ? origin : trimmed)
+                                        (origin == null || origin.isEmpty() ? trimmed : origin)
                                                 .hashCode()));
                 siteObj.put("name", title);
-                if (cmsMatcher.find()) {
-                    siteObj.put("type", 1);
-                    siteObj.put("api", cmsMatcher.group());
+                siteObj.put("type", 3);
+                if (origin != null
+                        && origin.split("[?#]", 2)[0].toLowerCase(Locale.ROOT).endsWith(".py")) {
+                    siteObj.put("api", origin);
                 } else {
-                    siteObj.put("type", 3);
-                    siteObj.put(
-                            "api",
-                            origin != null && !origin.isEmpty() ? origin : "csp_PythonSpider.py");
+                    siteObj.put("api", "csp_LocalPython");
+                    siteObj.put("ext", trimmed);
                 }
                 siteObj.put("searchable", 1);
                 JSONObject synth = new JSONObject().put("sites", new JSONArray().put(siteObj));
@@ -244,28 +251,25 @@ public final class Cms {
                 && !root.optString("api").isEmpty()) {
             sites = new JSONArray().put(root);
         }
-        if ((sites == null || sites.length() == 0) && origin != null && isHttp(origin)) {
-            JSONArray warehouses = root.optJSONArray("urls");
-            if (warehouses == null) warehouses = root.optJSONArray("storeHouse");
-            if (warehouses != null && warehouses.length() > 0) {
-                for (int i = 0; i < Math.min(5, warehouses.length()); i++) {
-                    JSONObject w = warehouses.optJSONObject(i);
-                    if (w == null) continue;
-                    String subUrl =
-                            resolve(origin, w.optString("url", w.optString("sourceUrl", "")));
-                    if (isHttp(subUrl) && !subUrl.equals(origin)) {
-                        try {
-                            return parseConfig(fetch(subUrl, null), subUrl);
-                        } catch (Exception ignored) {
-                        }
-                    }
-                }
-            }
+        if (Warehouse.isCatalog(root)) {
+            String resolved =
+                    Warehouse.resolve(
+                            text,
+                            origin,
+                            url -> fetch(url, null),
+                            raw -> new JSONObject(withoutComments(raw)),
+                            (raw, base) -> parseConfig(raw, base));
+            return parseConfig(resolved, origin);
         }
+        origin = root.optString(Warehouse.ORIGIN, origin);
         if (sites == null || sites.length() == 0) throw new IOException("配置中没有 sites 来源列表");
         if (sites.length() > 500) throw new IOException("来源超过 500 个限制");
         Config out = new Config();
         out.raw = text;
+        out.origin = origin == null ? "" : origin;
+        out.warehouse = root.optString(Warehouse.ROOT, "");
+        JSONArray directory = root.optJSONArray(Warehouse.DEPOTS);
+        if (directory != null) out.depots = directory;
         String rawSpider = root.optString("spider", "");
         if (!rawSpider.isEmpty()) {
             String[] spParts = rawSpider.split(";md5;", 2);
@@ -294,6 +298,10 @@ public final class Cms {
             s.playUrl = j.optString("playUrl", "");
             s.searchable = j.optInt("searchable", 1) != 0;
             s.ext = j.opt("ext");
+            if (origin != null && origin.startsWith("file://") && s.ext instanceof String) {
+                String ext = (String) s.ext;
+                if (ext.startsWith("./") || ext.startsWith("../")) s.ext = resolve(origin, ext);
+            }
             s.requiresParser =
                     !s.playUrl.isEmpty() || j.optInt("parse", 0) == 1 || j.optInt("jx", 0) == 1;
             s.headers.put("User-Agent", USER_AGENT);
@@ -590,6 +598,7 @@ public final class Cms {
         v.tag = j.optString("vod_tag");
         v.year = j.optString("vod_year");
         v.area = j.optString("vod_area");
+        v.genre = j.optString("vod_class", j.optString("type_name"));
         v.actor = j.optString("vod_actor");
         v.director = j.optString("vod_director");
         v.description =

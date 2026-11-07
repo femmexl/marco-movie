@@ -91,6 +91,30 @@ class MirrorTests(unittest.TestCase):
         with zipfile.ZipFile(source,'w') as z: z.writestr('AndroidManifest.xml',b'<manifest/>')
         with self.assertRaises(ValueError): m.apk_identity(source.getvalue())
 
+    def test_large_tv_package_is_verified_and_linked_from_both_download_and_feed(self):
+        name='MarcoMovie-0.4.12-preview.apk'
+        self.release['assets']=[a for a in self.release['assets'] if a['name'] not in (name,name+'.sha256')]
+        self.add_asset(name,b'large apk fixture' * (m.LIMIT//17+2))
+        feed=self.sync()
+        expected=f'https://github.com/{m.REPO}/releases/download/v0.4.12-preview/{name}'
+        self.assertEqual(feed['url'],expected)
+        self.assertFalse((self.out/name).exists())
+        self.assertIn('href="'+expected+'"',(self.out/'index.html').read_text(encoding='utf8'))
+
+    def test_official_release_updates_stable_channel(self):
+        self.release['prerelease']=False
+        feed=self.sync()
+        self.assertFalse(feed['prerelease'])
+        self.assertEqual(json.loads((self.out/'updates/stable.json').read_text(encoding='utf8')),feed)
+
+    def test_large_mobile_hero_link_matches_update_feed(self):
+        name='MarcoMovie-0.4.12-mobile.apk';self.add_asset(name,b'mobile fixture')
+        next(a for a in self.release['assets'] if a['name']==name)['size']=m.LIMIT+1
+        feed=self.sync()
+        page=(self.out/'index.html').read_text(encoding='utf8')
+        self.assertIn('href="'+feed['mobile']['url']+'">下载 Android 手机版',page)
+        self.assertNotIn('href="'+name+'"',page)
+
     def add_asset(self, name, body, checksum=True):
         url = f'https://github.com/{m.REPO}/releases/download/v0.4.12-preview/{name}'
         sha = hashlib.sha256(body).hexdigest()

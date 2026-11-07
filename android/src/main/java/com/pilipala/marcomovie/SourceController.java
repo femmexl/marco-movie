@@ -21,8 +21,33 @@ import java.util.concurrent.Future;
 final class SourceController {
     private SourceController() {}
 
+    static String importOrigin(String address) {
+        return com.pilipala.emby.CheckedScript.matches(address) ? "" : address;
+    }
+
+    static String fetchImport(android.content.Context context, String address) throws Exception {
+        if (!com.pilipala.emby.CheckedScript.matches(address)) return Cms.fetch(address, null);
+        com.pilipala.emby.CheckedScript script = com.pilipala.emby.CheckedScript.read(address);
+        if (com.pilipala.catpaw.CatPawHost.isBundle(script.code))
+            return new com.pilipala.catpaw.CatPawHost(context).install(script.code);
+        if (!script.code.contains("export default") && !script.code.contains("__jsEvalReturn"))
+            throw new IOException("已校验的文件没有兼容的来源入口");
+        org.json.JSONObject site =
+                new org.json.JSONObject()
+                        .put("key", "script_" + script.base.hashCode())
+                        .put("name", new java.net.URL(script.base).getHost())
+                        .put("type", 3)
+                        .put("api", script.base)
+                        .put("ext", new org.json.JSONObject().put("_mm_entrySource", script.code));
+        return new org.json.JSONObject()
+                .put("sites", new org.json.JSONArray().put(site))
+                .toString();
+    }
+
     static boolean available(MainActivity a, Cms.Site s) {
-        return s.supported()
+        return s.api.startsWith(com.pilipala.emby.EmbyLibrary.PREFIX)
+                || s.api.startsWith("catpaw://")
+                || s.supported()
                 || (a.prefs.getBoolean(Prefs.EXPERIMENTAL_CSP, true)
                         && ((CspEngine.eligible(s)
                                         && ((s.jar != null && !s.jar.isEmpty())
@@ -55,8 +80,12 @@ final class SourceController {
                         if (existing != null) return existing;
                     }
                     SourceEngine raw;
-                    if (s.supported()) raw = new JsonCmsEngine(s);
+                    if (s.api.startsWith(com.pilipala.emby.EmbyLibrary.PREFIX))
+                        raw = new EmbyEngine(a, s);
+                    else if (s.api.startsWith("catpaw://")) raw = new CatPawEngine(a, s);
+                    else if (s.supported()) raw = new JsonCmsEngine(s);
                     else if (a.prefs.getBoolean(Prefs.EXPERIMENTAL_CSP, true)
+                            && !JsEngine.eligible(s)
                             && CspEngine.eligible(s)
                             && snapshot != null) {
                         ensureProxy(a, snapshot);
@@ -357,16 +386,19 @@ final class SourceController {
                                                                         "连接配置并读取来源…",
                                                                         () -> {
                                                                             String raw =
-                                                                                    Cms.fetch(
-                                                                                            address,
-                                                                                            null);
+                                                                                    fetchImport(
+                                                                                            a,
+                                                                                            address);
                                                                             return Cms.parseConfig(
-                                                                                    raw, address);
+                                                                                    raw,
+                                                                                    importOrigin(
+                                                                                            address));
                                                                         },
                                                                         c ->
                                                                                 a.saveConfig(
                                                                                         c,
-                                                                                        address));
+                                                                                        importOrigin(
+                                                                                                address)));
                                                             }),
                                                     true);
                                         }));
@@ -590,7 +622,7 @@ final class SourceController {
                                     new java.io.FileOutputStream(liveFile)) {
                                 out.write(text.getBytes("UTF-8"));
                             }
-                            savedUrl = liveFile.toURI().toURL().toString();
+                            savedUrl = Cms.fileUri(liveFile);
                             savedName = "本地直播 (" + count + "台)";
                         }
                         a.ui.post(
@@ -656,82 +688,6 @@ final class SourceController {
         saveConfig(a, merged, a.configOrigin);
     }
 
-    private static void deleteRecursive(java.io.File f) {
-        if (f == null || !f.exists()) return;
-        if (f.isDirectory()) {
-            java.io.File[] children = f.listFiles();
-            if (children != null) {
-                for (java.io.File c : children) deleteRecursive(c);
-            }
-        }
-        f.delete();
-    }
-
-    private static java.io.File findMainConfigInDir(java.io.File dir) {
-        if (dir == null || !dir.isDirectory()) return null;
-        String[] preferred = {"config.json", "api.json", "tv.json", "index.json", "main.json"};
-        for (String name : preferred) {
-            java.io.File f = new java.io.File(dir, name);
-            if (f.isFile()) return f;
-        }
-        java.io.File[] files = dir.listFiles();
-        if (files == null) return null;
-        for (java.io.File f : files) {
-            if (f.isFile() && f.getName().toLowerCase(java.util.Locale.ROOT).endsWith(".json")) {
-                return f;
-            }
-        }
-        for (java.io.File f : files) {
-            if (f.isDirectory()) {
-                java.io.File sub = findMainConfigInDir(f);
-                if (sub != null) return sub;
-            }
-        }
-        return null;
-    }
-
-    static Cms.Config extractZipPackage(java.io.File filesDir, byte[] zipBytes) throws Exception {
-        java.io.File pkgDir = new java.io.File(filesDir, "local_pkg");
-        deleteRecursive(pkgDir);
-        if (!pkgDir.mkdirs() && !pkgDir.exists()) throw new IOException("无法创建本地包解压目录");
-        String canonicalRoot = pkgDir.getCanonicalPath();
-        long totalWritten = 0;
-        try (java.util.zip.ZipInputStream zis =
-                new java.util.zip.ZipInputStream(new java.io.ByteArrayInputStream(zipBytes))) {
-            java.util.zip.ZipEntry entry;
-            byte[] buf = new byte[8192];
-            while ((entry = zis.getNextEntry()) != null) {
-                String entryName = entry.getName().replace('\\', '/');
-                if (entryName.startsWith("/") || entryName.contains("..")) continue;
-                java.io.File target = new java.io.File(pkgDir, entryName);
-                if (!target.getCanonicalPath().startsWith(canonicalRoot)) continue;
-                if (entry.isDirectory()) {
-                    target.mkdirs();
-                } else {
-                    java.io.File parent = target.getParentFile();
-                    if (parent != null && !parent.exists()) parent.mkdirs();
-                    try (java.io.OutputStream out = new java.io.FileOutputStream(target)) {
-                        int n;
-                        while ((n = zis.read(buf)) != -1) {
-                            totalWritten += n;
-                            if (totalWritten > 48L * 1024 * 1024)
-                                throw new IOException("本地包解压内容超过 48 MB 限制");
-                            out.write(buf, 0, n);
-                        }
-                    }
-                }
-                zis.closeEntry();
-            }
-        }
-        java.io.File mainJson = findMainConfigInDir(pkgDir);
-        if (mainJson == null) throw new IOException("本地 ZIP 包中未找到 JSON 配置文件");
-        try (InputStream in = new java.io.FileInputStream(mainJson)) {
-            String raw = Cms.read(in, Cms.MAX_JSON);
-            String origin = mainJson.toURI().toURL().toString();
-            return Cms.parseConfig(raw, origin);
-        }
-    }
-
     static void importLocalUri(MainActivity a, Uri uri, boolean preferLive) {
         a.toast("正在读取本地文件…");
         a.worker.execute(
@@ -776,14 +732,15 @@ final class SourceController {
                                                 && (rawBytes[2] & 0xff) == 0x03
                                                 && (rawBytes[3] & 0xff) == 0x04);
                         if (isZip && !lowerName.endsWith(".jar")) {
-                            Cms.Config pkgConfig = extractZipPackage(a.getFilesDir(), rawBytes);
+                            LocalSourcePackage pkg =
+                                    LocalSourcePackage.open(a.getFilesDir(), rawBytes);
                             a.ui.post(
                                     () -> {
                                         try {
-                                            saveConfig(a, pkgConfig, "");
+                                            saveConfig(a, pkg.config, pkg.origin);
                                             a.toast(
                                                     "本地包导入成功（共 "
-                                                            + pkgConfig.sites.size()
+                                                            + pkg.config.sites.size()
                                                             + " 个片源）");
                                         } catch (Exception ex) {
                                             a.toast("保存本地包配置失败：" + a.message(ex));
@@ -804,7 +761,7 @@ final class SourceController {
                                         new java.io.FileOutputStream(liveFile)) {
                                     out.write(text.getBytes("UTF-8"));
                                 }
-                                final String liveUrl = liveFile.toURI().toURL().toString();
+                                final String liveUrl = Cms.fileUri(liveFile);
                                 final int count = cat.channelCount();
                                 final String liveName = displayName + " (" + count + "台)";
                                 a.ui.post(
@@ -838,7 +795,7 @@ final class SourceController {
                                     new java.io.FileOutputStream(savedFile)) {
                                 out.write(text.getBytes("UTF-8"));
                             }
-                            String fileOrigin = savedFile.toURI().toURL().toString();
+                            String fileOrigin = Cms.fileUri(savedFile);
                             Cms.Config singleCfg = Cms.parseConfig(text, fileOrigin);
                             a.ui.post(
                                     () -> {
@@ -871,7 +828,7 @@ final class SourceController {
                                         new java.io.FileOutputStream(liveFile)) {
                                     out.write(text.getBytes("UTF-8"));
                                 }
-                                final String liveUrl = liveFile.toURI().toURL().toString();
+                                final String liveUrl = Cms.fileUri(liveFile);
                                 final int count = cat.channelCount();
                                 a.ui.post(
                                         () -> {
@@ -897,7 +854,10 @@ final class SourceController {
     }
 
     static void saveConfig(MainActivity a, Cms.Config c, String origin) throws Exception {
+        if (!c.warehouse.isEmpty()) origin = c.warehouse;
+        else if (!c.origin.isEmpty()) origin = c.origin;
         a.configStore.write(c.raw);
+        SourcePicker.applyEdits(a, c, origin);
         a.closeEngines();
         a.config = c;
         a.configOrigin = origin;

@@ -18,10 +18,14 @@ final class UpdatePolicy {
     }
 
     static String[] downloads(String version) {
+        return downloads(version, false);
+    }
+
+    static String[] downloads(String version, boolean mobile) {
         if (version == null
                 || !version.matches("[0-9]+\\.[0-9]+\\.[0-9]+(?:-[a-zA-Z0-9.]+)?")
                 || version.length() > 48) throw new IllegalArgumentException("version");
-        String file = "MarcoMovie-" + version + "-preview.apk";
+        String file = "MarcoMovie-" + version + (mobile ? "-mobile.apk" : "-preview.apk");
         return new String[] {
             MIRROR + file,
             "https://github.com/Pilipala9919/MarcoMovie/releases/download/v"
@@ -81,6 +85,19 @@ final class UpdatePolicy {
             String url,
             boolean preview,
             String channel) {
+        validate(code, version, minSdk, size, sha, url, preview, channel, false);
+    }
+
+    static void validate(
+            int code,
+            String version,
+            int minSdk,
+            long size,
+            String sha,
+            String url,
+            boolean preview,
+            String channel,
+            boolean mobile) {
         if (code <= 0
                 || version == null
                 || !version.matches("[0-9]+\\.[0-9]+\\.[0-9]+(?:-[a-zA-Z0-9.]+)?")
@@ -92,7 +109,7 @@ final class UpdatePolicy {
                 || sha == null
                 || !sha.matches("[a-f0-9]{64}")
                 || !apkUrl(url)
-                || !java.util.Arrays.asList(downloads(version)).contains(url)
+                || !java.util.Arrays.asList(downloads(version, mobile)).contains(url)
                 || (!"stable".equals(channel) && !"preview".equals(channel))
                 || ("stable".equals(channel) && preview))
             throw new IllegalArgumentException("Invalid update metadata");

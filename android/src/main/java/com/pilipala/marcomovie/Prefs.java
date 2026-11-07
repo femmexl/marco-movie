@@ -24,6 +24,7 @@ final class Prefs {
     static final String WALLPAPER_ENABLED = "wallpaper_enabled";
     static final String WALLPAPER_DIM = "wallpaper_dim";
     static final String REDUCED = "reduced";
+    static final String REDUCED_TRANSPARENCY = "reduced_transparency";
     static final String PLAYER_ENGINE = "player_engine";
     static final String VIDEO_OUTPUT = "video_output";
     static final String DECODER_MODE = "decoder_mode";
@@ -56,6 +57,8 @@ final class Prefs {
     static final String LIVE_URL = "live_url";
     static final String LIVE_NAME = "live_name";
     static final String SELECTED_SITE = "selected_site";
+    static final String PREFERRED_SITE = "preferred_site_identity";
+    static final String PREFERRED_LINE = "preferred_line";
     static final String LOADING_SITE = "loading_site";
     static final String EXPERIMENTAL_CSP = "experimental_csp";
     static final String FAVORITES = "favorites";
@@ -73,6 +76,7 @@ final class Prefs {
         WALLPAPER_ENABLED,
         WALLPAPER_DIM,
         REDUCED,
+        REDUCED_TRANSPARENCY,
         PLAYER_ENGINE,
         VIDEO_OUTPUT,
         DECODER_MODE,
@@ -103,6 +107,7 @@ final class Prefs {
                                     HOME_AMBIENT,
                                     WALLPAPER_ENABLED,
                                     REDUCED,
+                                    REDUCED_TRANSPARENCY,
                                     AUTO_NEXT,
                                     DANMAKU_DEFAULT,
                                     SOFTWARE_AUDIO,

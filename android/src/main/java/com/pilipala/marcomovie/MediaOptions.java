@@ -19,7 +19,7 @@ final class MediaOptions {
         if (out.url.isEmpty()
                 && !result.optString("playUrl").isEmpty()
                 && Cms.isMedia(result.optString("playUrl"))) {
-            out.url = LocalProxy.rewrite(result.optString("playUrl").trim());
+            out.url = ProxyAddress.rewrite(result.optString("playUrl").trim());
         }
         // For MKV / large container files where the spider returns both a loopback `/proxy`
         // multi-thread wrapper and a direct CDN URL ("直连原画"), prefer the direct CDN URL first
@@ -137,12 +137,12 @@ final class MediaOptions {
                 } catch (JSONException ignored) {
                 }
             }
-            return LocalProxy.rewrite(s);
+            return ProxyAddress.rewrite(s);
         }
         if (raw instanceof JSONObject) {
             JSONObject obj = (JSONObject) raw;
             String u = obj.optString("url", obj.optString("uri", obj.optString("src", ""))).trim();
-            return u.isEmpty() ? "" : LocalProxy.rewrite(u);
+            return u.isEmpty() ? "" : ProxyAddress.rewrite(u);
         }
         if (raw instanceof JSONArray) {
             JSONArray arr = (JSONArray) raw;
@@ -170,7 +170,7 @@ final class MediaOptions {
         if (raw == null) return "";
         String t = raw.trim();
         if (t.isEmpty()) return "";
-        return LocalProxy.rewrite(t);
+        return ProxyAddress.rewrite(t);
     }
 
     static String extractPlayUrl(Object rawUrl, JSONArray qualities) {
@@ -298,7 +298,7 @@ final class MediaOptions {
             put(headers, key, url.substring(start));
             url = url.substring(0, first).trim();
         }
-        return LocalProxy.rewrite(url);
+        return ProxyAddress.rewrite(url);
     }
 
     static void put(Map<String, String> target, String key, String value) {

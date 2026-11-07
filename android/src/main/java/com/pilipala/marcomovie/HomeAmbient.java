@@ -157,6 +157,7 @@ final class HomeAmbient extends View {
             fraction = 1;
             from = null;
             invalidate();
+            com.pilipala.glass.GlassworkSurface.invalidateBackdrop(a.root);
             return;
         }
         animation = ValueAnimator.ofFloat(0, 1);
@@ -166,6 +167,7 @@ final class HomeAmbient extends View {
                 v -> {
                     fraction = (Float) v.getAnimatedValue();
                     invalidate();
+                    com.pilipala.glass.GlassworkSurface.invalidateBackdrop(a.root);
                 });
         animation.addListener(
                 new AnimatorListenerAdapter() {

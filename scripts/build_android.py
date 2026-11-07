@@ -2,6 +2,7 @@
 from pathlib import Path
 import hashlib, json, os, re, subprocess, zipfile, urllib.request
 import xml.etree.ElementTree as ET
+from build_catpaw_android import build as build_catpaw
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / 'android/src/main'
@@ -69,6 +70,9 @@ def main():
                             native_files_mobile[name]=data
                         elif name.startswith('lib/arm64-v8a/'):
                             native_files_mobile[name]=data
+    catpaw_files, catpaw_assets = build_catpaw()
+    native_files.update({k:v for k,v in catpaw_files.items() if k.startswith('lib/armeabi-v7a/')})
+    native_files_mobile.update(catpaw_files)
     for p in (exe(JDK/'bin','java'), exe(SDK,'aapt2'), ANDROID):
         if not p.exists(): raise RuntimeError(f'Required existing tool missing: {p}')
     for folder in (BUILD, BUILD/'classes', BUILD/'dex', DIST): folder.mkdir(parents=True, exist_ok=True)
@@ -84,8 +88,8 @@ def main():
     generated=BUILD/'generated';generated.mkdir(exist_ok=True)
     for old in generated.rglob('*.java'):old.unlink()
     extra=['--extra-packages',':'.join(sorted(set(packages)))] if packages else []
-    run(exe(SDK,'aapt2'),'link','-o',BUILD/'resources.apk','--manifest',SRC/'AndroidManifest.xml','-I',ANDROID,'-A',SRC/'assets','--java',generated,'--auto-add-overlay',*extra,*overlays,'-R',BUILD/'resources.zip')
-    sources=sorted((SRC/'java').rglob('*.java'))+sorted(generated.rglob('*.java'))
+    run(exe(SDK,'aapt2'),'link','-o',BUILD/'resources.apk','--manifest',SRC/'AndroidManifest.xml','-I',ANDROID,'-A',SRC/'assets','-A',catpaw_assets,'--java',generated,'--auto-add-overlay',*extra,*overlays,'-R',BUILD/'resources.zip')
+    sources=sorted((SRC/'java').rglob('*.java'))+sorted((ROOT/'shared/java').rglob('*.java'))+sorted(generated.rglob('*.java'))
     run(exe(JDK/'bin','javac'),'-encoding','UTF-8','-source','8','-target','8','-Xlint:-options','-classpath',os.pathsep.join(str(p) for p in [ANDROID,*dependencies]),'-d',BUILD/'classes',*sources)
     with zipfile.ZipFile(BUILD/'classes.jar','w',zipfile.ZIP_DEFLATED) as z:
         for p in (BUILD/'classes').rglob('*.class'): z.write(p,p.relative_to(BUILD/'classes').as_posix())
@@ -126,7 +130,7 @@ def main():
     mobile_manifest=BUILD/'AndroidManifest.mobile.xml'
     mobile_xml=(SRC/'AndroidManifest.xml').read_text(encoding='utf-8').replace('android:value="tv"','android:value="mobile"').replace('<category android:name="android.intent.category.LEANBACK_LAUNCHER" />','')
     mobile_manifest.write_text(mobile_xml,encoding='utf-8')
-    run(exe(SDK,'aapt2'),'link','-o',BUILD/'resources-mobile.apk','--manifest',mobile_manifest,'-I',ANDROID,'-A',SRC/'assets','--auto-add-overlay',*extra,*overlays,'-R',BUILD/'resources.zip')
+    run(exe(SDK,'aapt2'),'link','-o',BUILD/'resources-mobile.apk','--manifest',mobile_manifest,'-I',ANDROID,'-A',SRC/'assets','-A',catpaw_assets,'--auto-add-overlay',*extra,*overlays,'-R',BUILD/'resources.zip')
     with zipfile.ZipFile(BUILD/'resources-mobile.apk') as source, zipfile.ZipFile(BUILD/'unsigned-mobile.apk','w',zipfile.ZIP_DEFLATED) as dest:
         for entry in source.infolist():dest.writestr(entry,source.read(entry.filename))
         for dex in (BUILD/'dex').glob('*.dex'):dest.write(dex,dex.name)

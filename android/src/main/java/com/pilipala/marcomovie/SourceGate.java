@@ -49,7 +49,8 @@ final class SourceGate {
         synchronized (this) {
             if (urgent) foreground++;
             try {
-                while ((occupied && !wedged) || (!urgent && (foreground > 0 || wedged))) {
+                while (occupied || (!urgent && foreground > 0)) {
+                    if (wedged) throw new IOException("来源请求尚未结束，请稍后重试或重新加载订阅");
                     wait();
                 }
                 if (current.isInterrupted()) throw new InterruptedException();

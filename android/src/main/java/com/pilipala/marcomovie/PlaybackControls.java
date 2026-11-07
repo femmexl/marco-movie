@@ -664,6 +664,7 @@ final class PlaybackControls {
     }
 
     void close() {
+        surface.setFrameAdvancing(false);
         if (activeDialog != null) {
             activeDialog.dismiss();
             activeDialog = null;

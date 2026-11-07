@@ -563,11 +563,7 @@ public class MoviePlayer {
                                                         mediaSourceFactory =
                                                                 new DefaultMediaSourceFactory(
                                                                         data, extractors);
-                                                        exo.setMediaSource(
-                                                                mediaSourceFactory
-                                                                        .createMediaSource(
-                                                                                mediaItem(
-                                                                                        address)));
+                                                        exo.setMediaSource(playbackSource(address));
                                                         exo.prepare();
                                                     } catch (Exception error) {
                                                         lastError =
@@ -911,6 +907,17 @@ public class MoviePlayer {
                 });
     }
 
+    private androidx.media3.exoplayer.source.MediaSource playbackSource(Uri address)
+            throws Exception {
+        androidx.media3.exoplayer.source.MediaSource video =
+                mediaSourceFactory.createMediaSource(mediaItem(address));
+        org.json.JSONObject extra = options.optJSONObject("extra");
+        String audio = extra == null ? "" : extra.optString("audio");
+        if (!Cms.isHttp(audio)) return video;
+        return new androidx.media3.exoplayer.source.MergingMediaSource(
+                true, video, mediaSourceFactory.createMediaSource(MediaItem.fromUri(audio)));
+    }
+
     private MediaItem mediaItem(Uri address) throws Exception {
         MediaItem.Builder item = new MediaItem.Builder().setUri(address);
         if (mediaMime != null
@@ -986,8 +993,7 @@ public class MoviePlayer {
                                     .put("mimeType", mime));
                     long position = exo.getCurrentPosition();
                     boolean play = exo.getPlayWhenReady();
-                    exo.setMediaSource(
-                            mediaSourceFactory.createMediaSource(mediaItem(uri)), position);
+                    exo.setMediaSource(playbackSource(uri), position);
                     exo.prepare();
                     exo.setPlayWhenReady(play);
                     return null;

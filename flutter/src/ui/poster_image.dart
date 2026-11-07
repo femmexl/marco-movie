@@ -1,4 +1,6 @@
 import 'dart:async';
+import '../core/emby_library.dart';
+import '../core/catpaw_host.dart';
 import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
@@ -80,8 +82,7 @@ class PosterLoader {
     ..idleTimeout = const Duration(seconds: 25)
     ..maxConnectionsPerHost = 18
     ..userAgent = null
-    ..autoUncompress = true
-    ..badCertificateCallback = (_, __, ___) => true;
+    ..autoUncompress = true;
 
   /// Increments whenever any poster image bytes are written into [_memory].
   /// Active [PosterImage] widgets listen to this notifier so scrolling lists
@@ -406,6 +407,7 @@ class PosterLoader {
     String title = '',
     bool preferHd = false,
   }) {
+    if (EmbyLibrary.isImage(rawUrl)) return _memory[rawUrl];
     final clean = _cleanTitle(title);
     if (preferHd && clean.isNotEmpty) {
       final hdKey = 'title_hd:$clean';
@@ -456,6 +458,13 @@ class PosterLoader {
   /// Loads poster bytes, de-duplicating concurrent requests and racing slow
   /// overseas URLs against fast domestic HD cover resolution by [title].
   static Future<Uint8List> load(String raw, {String title = ''}) {
+    if (EmbyLibrary.isImage(raw)) {
+      final cached = _memory[raw];
+      if (cached != null) return SynchronousFuture(cached);
+      return _inflight.putIfAbsent(raw, () => _fetch(raw, const {}, timeout: const Duration(seconds: 8))
+        .then((bytes) { _remember(raw, bytes); return bytes; })
+        .whenComplete(() { _inflight.remove(raw); }));
+    }
     final immediate = peekMemory(raw, title: title);
     if (immediate != null) {
       return SynchronousFuture<Uint8List>(immediate);
@@ -468,7 +477,7 @@ class PosterLoader {
     final pending = _inflight[key];
     if (pending != null) return pending;
     final future = _loadUncached(upgradedUrl, title.trim(), key)
-        .whenComplete(() => _inflight.remove(key));
+        .whenComplete(() { _inflight.remove(key); });
     _inflight[key] = future;
     return future;
   }
@@ -568,7 +577,7 @@ class PosterLoader {
       }
       throw Exception('未找到「$clean」高清封面');
     }()
-        .whenComplete(() => _inflightHdTitleBytes.remove(clean));
+        .whenComplete(() { _inflightHdTitleBytes.remove(clean); });
 
     _inflightHdTitleBytes[clean] = future;
     return future;
@@ -984,7 +993,7 @@ class PosterLoader {
       metadataRevision.value++;
       return result;
     }()
-        .whenComplete(() => _inflightEpisodeMeta.remove(clean));
+        .whenComplete(() { _inflightEpisodeMeta.remove(clean); });
 
     _inflightEpisodeMeta[clean] = future;
     return future;
@@ -1298,7 +1307,7 @@ class PosterLoader {
       metadataRevision.value++;
       return stills;
     }()
-        .whenComplete(() => _inflightSeriesStills.remove(clean));
+        .whenComplete(() { _inflightSeriesStills.remove(clean); });
 
     _inflightSeriesStills[clean] = future;
     return future;
@@ -1579,7 +1588,7 @@ class PosterLoader {
       }
       throw lastError ?? Exception('未找到「$cleanTitle」海报');
     }()
-        .whenComplete(() => _inflightTitleBytes.remove(inflightKey));
+        .whenComplete(() { _inflightTitleBytes.remove(inflightKey); });
 
     _inflightTitleBytes[inflightKey] = future;
     return future;
@@ -2007,6 +2016,7 @@ class PosterLoader {
 
   /// Builds an ordered list of `(url, headers)` attempts for one poster.
   static List<(String, Map<String, String>)> _attemptsFor(String raw) {
+    if (CatPawHost.matches(raw)) return [(raw, const <String,String>{})];
     var url = raw;
     final embedded = <String, String>{};
     final marker = RegExp(r'@(Referer|User-Agent|referer|user-agent)=');
@@ -2153,10 +2163,14 @@ class PosterLoader {
   }) async {
     HttpClientRequest? request;
     try {
-      request = await _client.getUrl(Uri.parse(url)).timeout(timeout);
-      request.followRedirects = true;
+      if (CatPawHost.matches(url)) url = (await CatPawHost.instance.resolve(url)).toString();
+      final privateImage = EmbyLibrary.isImage(url);
+      final scopedHeaders = privateImage ? await EmbyLibrary.imageHeaders(url) : const <String,String>{};
+      request = await _client.getUrl(Uri.parse(url).removeFragment()).timeout(timeout);
+      request.followRedirects = !privateImage;
       request.maxRedirects = 6;
       headers.forEach((k, v) => request!.headers.set(k, v));
+      scopedHeaders.forEach((k,v) => request!.headers.set(k,v));
       final response = await request.close().timeout(timeout);
       if (response.statusCode < 200 || response.statusCode >= 300) {
         await response.drain<void>();
@@ -2438,6 +2452,7 @@ class _PosterImageState extends State<PosterImage>
     String requestedTitle,
     int currentBytesLen,
   ) async {
+    if (EmbyLibrary.isImage(widget.url)) return;
     try {
       final hdBytes = await PosterLoader.loadHdByTitle(
         requestedTitle,
@@ -2461,7 +2476,7 @@ class _PosterImageState extends State<PosterImage>
     final requestedUrl = widget.url.trim();
     final requestedTitle = widget.title.trim();
     try {
-      if (widget.highRes && requestedTitle.isNotEmpty) {
+      if (widget.highRes && requestedTitle.isNotEmpty && !EmbyLibrary.isImage(requestedUrl)) {
         unawaited(_tryUpgradeToHd(requestedTitle, _bytes?.length ?? 0));
       }
       final data = await PosterLoader.load(
@@ -2480,7 +2495,7 @@ class _PosterImageState extends State<PosterImage>
         updateKeepAlive();
         _notifyBytes(data);
       }
-      if (widget.highRes && requestedTitle.isNotEmpty) {
+      if (widget.highRes && requestedTitle.isNotEmpty && !EmbyLibrary.isImage(requestedUrl)) {
         unawaited(_verifyAndUpgradeIfLowRes(data, requestedTitle));
       }
     } catch (_) {

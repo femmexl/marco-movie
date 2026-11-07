@@ -1,3 +1,5 @@
+import 'dart:io';
+import 'package:window_manager/window_manager.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -9,6 +11,9 @@ import 'ui/adaptive_shell.dart';
 import 'ui/apple_theme.dart';
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  if (Platform.isWindows || Platform.isMacOS || Platform.isLinux) {
+    await windowManager.ensureInitialized();
+  }
   try {
     MediaKit.ensureInitialized();
   } catch (e) {
@@ -25,6 +30,7 @@ Future<void> main() async {
     );
   } catch (_) {}
   final storage = await StorageService.init();
+  GlassworkBackdrop.reduceTransparency.value = storage.glassBlurLevel == 'solid';
   final client = CmsClient();
   try {
     await DownloadService.instance.init(client);

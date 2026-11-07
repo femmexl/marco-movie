@@ -36,6 +36,59 @@ class DetailScreen extends StatefulWidget {
   State<DetailScreen> createState() => _DetailScreenState();
 }
 
+class _OtherSourceResults extends StatefulWidget {
+  final Stream<(CmsSite, List<CmsVideo>)> results;
+  const _OtherSourceResults({required this.results});
+
+  @override
+  State<_OtherSourceResults> createState() => _OtherSourceResultsState();
+}
+
+class _OtherSourceResultsState extends State<_OtherSourceResults> {
+  final _matches = <(CmsSite, CmsVideo)>[];
+  late final StreamSubscription<(CmsSite, List<CmsVideo>)> _search;
+  bool _done = false;
+  bool _failed = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _search = widget.results.listen((result) {
+      if (mounted) setState(() {
+        _matches.addAll(result.$2.map((v) => (result.$1, v)));
+      });
+    }, onDone: () { if (mounted) setState(() => _done = true); },
+       onError: (Object error) { if (mounted) setState(() => _failed = true); });
+  }
+
+  @override
+  void dispose() {
+    _search.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ListView.builder(
+      shrinkWrap: true,
+      itemCount: _matches.length + (_done && _matches.isNotEmpty ? 0 : 1),
+      itemBuilder: (context, index) {
+        if (index == _matches.length) {
+          return Padding(padding: const EdgeInsets.all(20), child: Center(
+            child: _done ? Text(_failed ? '搜索失败，可关闭后重试' : '已导入的可搜索片源没有返回匹配影片')
+                : const CupertinoActivityIndicator(),
+          ));
+        }
+        final (site, video) = _matches[index];
+        return ListTile(title: Text(video.title), subtitle: Text(
+          [site.name, video.year, video.remarks].where((s) => s.isNotEmpty).join(' · ')),
+          onTap: () => Navigator.of(context).pop((site, video)),
+        );
+      },
+    );
+  }
+}
+
 class _DetailScreenState extends State<DetailScreen> {
   late CmsSite _activeSite;
   late CmsVideo _video;
@@ -151,6 +204,7 @@ class _DetailScreenState extends State<DetailScreen> {
   }
 
   Future<void> _warmExternalMetadata(String title) async {
+    if (_activeSite.isEmby) return;
     if (title.trim().isEmpty) return;
     unawaited(
       PosterLoader.fetchSeriesSynopsis(title).then((syn) {
@@ -176,13 +230,16 @@ class _DetailScreenState extends State<DetailScreen> {
       _error = null;
     });
     try {
-      final detailed =
-          await widget.client.fetchDetail(targetSite, targetVideo);
+      final (owner, detailed) = await widget.client.playableDetail(
+        targetSite, targetVideo, widget.storage.prioritizeSites(widget.storage.loadSavedConfig()?.sites ?? const []),
+      );
       if (!mounted ||
           targetSite.key != _activeSite.key ||
           targetVideo.id != _video.id) {
         return;
       }
+      _activeSite = owner;
+      _isFavorite = widget.storage.isFavorite(owner.key, detailed.id, forPrivate: owner.isEffectivelyPrivate);
       final bookmark = _findBookmark();
       int initialLine = 0;
       if (bookmark != null && detailed.lines.isNotEmpty) {
@@ -214,6 +271,7 @@ class _DetailScreenState extends State<DetailScreen> {
   }
 
   Future<void> _discoverRelatedSeasons(String title) async {
+    if (_activeSite.isEmby) return;
     final info = CmsParser.parseSeriesSeasonInfo(title);
     final base = info.baseTitle.trim();
     if (base.isEmpty) return;
@@ -449,18 +507,6 @@ class _DetailScreenState extends State<DetailScreen> {
       return ext;
     }
     return raw;
-  }
-
-  String _deriveRatingScore() {
-    final remarks = _video.remarks.trim();
-    final match = RegExp(r'\b([5-9]\.\d)\b').firstMatch(remarks);
-    if (match != null) return match.group(1)!;
-    int hash = 0;
-    for (final unit in _video.title.codeUnits) {
-      hash = (hash * 37 + unit) & 0x7fffffff;
-    }
-    final tenths = 72 + (hash % 23); // 7.2 .. 9.4
-    return (tenths / 10.0).toStringAsFixed(1);
   }
 
   (String, String?) _parseEpisodeDisplay(String rawName, int oneBasedIndex) {
@@ -843,7 +889,7 @@ class _DetailScreenState extends State<DetailScreen> {
 
   void _showSourcePickerSheet() {
     if (_video.lines.isEmpty) {
-      _toast('正在加载播放源，请稍候…');
+      if (!_loading) _searchOtherSources();
       return;
     }
     final safeLineIdx = _selectedLine.clamp(0, _video.lines.length - 1);
@@ -851,7 +897,7 @@ class _DetailScreenState extends State<DetailScreen> {
     showAppleModalSheet<void>(
       context: context,
       title: '切换播放源 (${_video.lines.length})',
-      builder: (ctx) => ListView(
+      builder: (ctx) => StatefulBuilder(builder: (ctx, updateSheet) => ListView(
         shrinkWrap: true,
         padding: const EdgeInsets.fromLTRB(16, 12, 16, 20),
         children: [
@@ -898,13 +944,15 @@ class _DetailScreenState extends State<DetailScreen> {
                         : AppleColors.groupedTertiary,
                     title: line.name,
                     subtitle: '共 ${line.episodes.length} 集 · ${_activeSite.name}',
-                    trailing: selected
-                        ? const Icon(
-                            CupertinoIcons.checkmark_alt,
-                            color: AppleColors.systemBlue,
-                            size: 18,
-                          )
-                        : null,
+                    trailing: _activeSite.isEffectivelyPrivate ? null : IconButton(
+                      tooltip: widget.storage.preferredLineName == line.name ? '取消默认播放线路' : '设为默认播放线路',
+                      icon: Icon(widget.storage.preferredLineName == line.name ? Icons.star_rounded : Icons.star_border_rounded,
+                        color: widget.storage.preferredLineName == line.name ? Colors.amber : AppleColors.labelSecondary),
+                      onPressed: () async {
+                        await widget.storage.setPreferredLineName(widget.storage.preferredLineName == line.name ? '' : line.name);
+                        if (ctx.mounted) updateSheet(() {});
+                      },
+                    ),
                     onTap: () {
                       Navigator.of(ctx).pop();
                       setState(() {
@@ -919,8 +967,27 @@ class _DetailScreenState extends State<DetailScreen> {
             ),
           ],
         ],
+      )),
+    );
+  }
+
+  Future<void> _searchOtherSources() async {
+    final sites = widget.storage.loadSavedConfig()?.supportedSites ?? const <CmsSite>[];
+    final candidates = sites.where((s) => s.key != _activeSite.key &&
+        s.searchable && s.isEffectivelyPrivate == _activeSite.isEffectivelyPrivate).toList();
+    final results = widget.client.searchAcrossSites(widget.storage.prioritizeSites(candidates), _video.title);
+    final pick = await showAppleModalSheet<(CmsSite, CmsVideo)>(
+      context: context,
+      title: '在其他片源搜索《${_video.title}》',
+      builder: (_) => _OtherSourceResults(
+        results: results,
       ),
     );
+    if (pick == null || !mounted) return;
+    await Navigator.of(context).push(CupertinoPageRoute<void>(
+      builder: (_) => DetailScreen(site: pick.$1, initialVideo: pick.$2,
+        client: widget.client, storage: widget.storage),
+    ));
   }
 
   void _showAllEpisodesGridSheet(WatchHistoryEntry? bookmark) {
@@ -990,6 +1057,10 @@ class _DetailScreenState extends State<DetailScreen> {
   }
 
   void _showDownloadSheet() {
+    if (_activeSite.isEffectivelyPrivate) {
+      _toast('隐私分组暂不支持离线下载');
+      return;
+    }
     if (_video.lines.isEmpty) {
       _toast('暂未获取到可下载的剧集资源');
       return;
@@ -1449,7 +1520,7 @@ class _DetailScreenState extends State<DetailScreen> {
                                 const Padding(
                                   padding: EdgeInsets.symmetric(vertical: 20),
                                   child: Text(
-                                    '暂未获取到可播放的剧集资源',
+                                    '当前片单未提供播放地址，已启用的片源中也没有匹配到可播剧集',
                                     textAlign: TextAlign.center,
                                     style: TextStyle(
                                       color: AppleColors.labelSecondary,
@@ -1677,7 +1748,6 @@ class _DetailScreenState extends State<DetailScreen> {
       else if (epCount > 1)
         '共$epCount集',
     ];
-    final rating = _deriveRatingScore();
 
     return SizedBox(
       height: heroHeight,
@@ -1747,54 +1817,6 @@ class _DetailScreenState extends State<DetailScreen> {
                 mainAxisAlignment: MainAxisAlignment.center,
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 5,
-                      vertical: 1.5,
-                    ),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFF01B4E4),
-                      borderRadius: BorderRadius.circular(4),
-                    ),
-                    child: const Text(
-                      'TMDB',
-                      style: TextStyle(
-                        color: Color(0xFF081C22),
-                        fontSize: 9.5,
-                        fontWeight: FontWeight.w900,
-                        letterSpacing: 0.3,
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 6),
-                  Text(
-                    rating,
-                    style: const TextStyle(
-                      color: Color(0xFFF5C518),
-                      fontSize: 13.5,
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 6,
-                      vertical: 1.5,
-                    ),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFF2E9F43),
-                      borderRadius: BorderRadius.circular(4),
-                    ),
-                    child: const Text(
-                      '豆',
-                      style: TextStyle(
-                        color: Colors.white,
-                        fontSize: 9.5,
-                        fontWeight: FontWeight.w800,
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 5),
                   Text(
                     _activeSite.name,
                     style: const TextStyle(
@@ -1860,7 +1882,7 @@ class _DetailScreenState extends State<DetailScreen> {
     final hasLines = _video.lines.isNotEmpty;
     String playLabel = '加载片源中…';
     if (!_loading && !hasLines) {
-      playLabel = '未加载到相关资源';
+      playLabel = '搜索其他片源';
     } else if (bookmark != null) {
       final (cleanEp, _) =
           _parseEpisodeDisplay(bookmark.episode, bookmark.index + 1);
@@ -1885,7 +1907,7 @@ class _DetailScreenState extends State<DetailScreen> {
     }
 
     return GestureDetector(
-      onTap: hasLines ? () => _playPrimaryAction(bookmark) : null,
+      onTap: hasLines ? () => _playPrimaryAction(bookmark) : (_loading ? null : _searchOtherSources),
       child: Container(
         height: 48,
         padding: const EdgeInsets.symmetric(horizontal: 20),
@@ -2769,7 +2791,7 @@ class _DetailScreenState extends State<DetailScreen> {
                                 const Padding(
                                   padding: EdgeInsets.symmetric(vertical: 20),
                                   child: Text(
-                                    '暂未获取到可播放的剧集资源',
+                                    '当前片单未提供播放地址，已启用的片源中也没有匹配到可播剧集',
                                     style: TextStyle(
                                       color: AppleColors.labelSecondary,
                                       fontSize: 14,
@@ -2895,7 +2917,6 @@ class _DetailScreenState extends State<DetailScreen> {
       else if (epCount > 1)
         '共$epCount集',
     ];
-    final rating = _deriveRatingScore();
     final desc = _effectiveSeriesSynopsis();
     final cast = _video.actor.trim();
 
@@ -2928,44 +2949,6 @@ class _DetailScreenState extends State<DetailScreen> {
           runSpacing: 6,
           crossAxisAlignment: WrapCrossAlignment.center,
           children: [
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-              decoration: BoxDecoration(
-                color: const Color(0xFF01B4E4),
-                borderRadius: BorderRadius.circular(4),
-              ),
-              child: const Text(
-                'TMDB',
-                style: TextStyle(
-                  color: Color(0xFF081C22),
-                  fontSize: 10,
-                  fontWeight: FontWeight.w900,
-                ),
-              ),
-            ),
-            Text(
-              rating,
-              style: const TextStyle(
-                color: Color(0xFFF5C518),
-                fontSize: 14,
-                fontWeight: FontWeight.w800,
-              ),
-            ),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-              decoration: BoxDecoration(
-                color: const Color(0xFF2E9F43),
-                borderRadius: BorderRadius.circular(4),
-              ),
-              child: const Text(
-                '豆',
-                style: TextStyle(
-                  color: Colors.white,
-                  fontSize: 10,
-                  fontWeight: FontWeight.w800,
-                ),
-              ),
-            ),
             for (final tag in pills.take(4))
               Container(
                 padding: const EdgeInsets.symmetric(

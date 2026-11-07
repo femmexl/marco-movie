@@ -136,16 +136,6 @@ final class MobileDetailScreen {
         return Color.HSVToColor(hsv);
     }
 
-    static String deriveRatingScore(String title) {
-        if (title == null || title.isEmpty()) return "8.6";
-        int h = 0;
-        for (int i = 0; i < title.length(); i++) {
-            h = (h * 31 + title.charAt(i)) & 0x7fffffff;
-        }
-        int tenths = 78 + (h % 17); // 7.8 .. 9.4
-        return (tenths / 10) + "." + (tenths % 10);
-    }
-
     static final class EpisodeDisplay {
         final String cleanTitle;
         final String specBadge;
@@ -576,23 +566,6 @@ final class MobileDetailScreen {
         ratingLp.topMargin = a.dp(10);
         heroCenterCol.addView(ratingRow, ratingLp);
 
-        TextView tmdbBadge = a.text("TMDB", 9.5f, 0xff081c22);
-        tmdbBadge.setTypeface(null, Typeface.BOLD);
-        tmdbBadge.setPadding(a.dp(5), a.dp(1.5f), a.dp(5), a.dp(1.5f));
-        tmdbBadge.setBackground(a.bg(0xff01b4e4, 4));
-        ratingRow.addView(tmdbBadge);
-
-        final TextView ratingValue = a.text(deriveRatingScore(listing.title), 13.5f, 0xfff5c518);
-        ratingValue.setTypeface(null, Typeface.BOLD);
-        ratingValue.setPadding(a.dp(6), 0, a.dp(10), 0);
-        ratingRow.addView(ratingValue);
-
-        TextView douBadge = a.text("豆", 9.5f, Color.WHITE);
-        douBadge.setTypeface(null, Typeface.BOLD);
-        douBadge.setPadding(a.dp(5.5f), a.dp(1.5f), a.dp(5.5f), a.dp(1.5f));
-        douBadge.setBackground(a.bg(0xff2e9f43, 4));
-        ratingRow.addView(douBadge);
-
         TextView siteBadge = a.text(s.name, 12, 0xccffffff);
         siteBadge.setPadding(a.dp(6), 0, 0, 0);
         ratingRow.addView(siteBadge);
@@ -635,7 +608,7 @@ final class MobileDetailScreen {
         backBtn.setTag("detail-back");
         backBtn.setGravity(Gravity.CENTER);
         backBtn.setPadding(0, 0, a.dp(1), a.dp(2));
-        backBtn.setBackground(glassBg(a, 0x5218181c, 0x40ffffff, 999));
+        a.glass(backBtn, 999);
         bindTouchFeedback(backBtn);
         backBtn.setOnClickListener(v -> a.onBackPressed());
         topNavRow.addView(backBtn, new LinearLayout.LayoutParams(a.dp(40), a.dp(40)));
@@ -652,7 +625,7 @@ final class MobileDetailScreen {
         sourceTopBtn.setEllipsize(TextUtils.TruncateAt.END);
         sourceTopBtn.setMaxWidth(a.dp(156));
         sourceTopBtn.setPadding(a.dp(13), 0, a.dp(13), 0);
-        sourceTopBtn.setBackground(glassBg(a, 0x5218181c, 0x40ffffff, 999));
+        a.glass(sourceTopBtn, 999);
         bindTouchFeedback(sourceTopBtn);
         sourceTopBtn.setOnClickListener(v -> a.crossSearch(Cms.searchTitle(listing)));
         LinearLayout.LayoutParams sourceTopLp = new LinearLayout.LayoutParams(-2, a.dp(40));
@@ -663,7 +636,7 @@ final class MobileDetailScreen {
         LinearLayout rightActionPill = a.row();
         rightActionPill.setGravity(Gravity.CENTER_VERTICAL);
         rightActionPill.setPadding(a.dp(4), 0, a.dp(4), 0);
-        rightActionPill.setBackground(glassBg(a, 0x5218181c, 0x40ffffff, 999));
+        a.glass(rightActionPill, 999);
         topNavRow.addView(rightActionPill, new LinearLayout.LayoutParams(-2, a.dp(40)));
 
         final TextView downloadTopBtn = a.text("⬇", 16, Color.WHITE);
@@ -703,7 +676,6 @@ final class MobileDetailScreen {
                     if (v.poster == null || v.poster.isEmpty()) v.poster = listing.poster;
                     if (v.title == null || v.title.isEmpty()) v.title = listing.title;
                     titleView.setText(v.title);
-                    ratingValue.setText(deriveRatingScore(v.title));
                     if (!Objects.equals(v.poster, listing.poster)
                             && v.poster != null
                             && !v.poster.isEmpty()) {
@@ -717,7 +689,13 @@ final class MobileDetailScreen {
                     for (java.util.Iterator<Cms.Line> it = v.lines.iterator(); it.hasNext(); ) {
                         if (it.next().episodes.isEmpty()) it.remove();
                     }
-                    int firstLineCount = v.lines.isEmpty() ? 0 : v.lines.get(0).episodes.size();
+                    int firstLineCount =
+                            v.lines.isEmpty()
+                                    ? 0
+                                    : v.lines
+                                            .get(SourcePreferences.lineIndex(a, v))
+                                            .episodes
+                                            .size();
                     populateHeroPills(a, pillsRow, v, firstLineCount);
 
                     favTopBtn.setOnClickListener(
@@ -799,7 +777,13 @@ final class MobileDetailScreen {
                     // Full-Width White Capsule Play Button (matches iPhone `▶ 播放 · 第 1 季 · E01`)
                     SeasonMeta curSeason = parseSeasonMeta(v.title);
                     EpisodeDisplay firstDisp =
-                            parseEpisodeDisplay(v.lines.get(0).episodes.get(0).name, 1);
+                            parseEpisodeDisplay(
+                                    v.lines
+                                            .get(SourcePreferences.lineIndex(a, v))
+                                            .episodes
+                                            .get(0)
+                                            .name,
+                                    1);
                     String playLabel;
                     if (remembered != null) {
                         EpisodeDisplay remDisp = parseEpisodeDisplay(remembered.episode, 1);
@@ -811,7 +795,7 @@ final class MobileDetailScreen {
                                                 + " · 续播 "
                                                 + PlaybackController.formatTime(resumePos)
                                         : "▶   播放 · " + remDisp.cleanTitle;
-                    } else if (v.lines.get(0).episodes.size() > 1) {
+                    } else if (v.lines.get(SourcePreferences.lineIndex(a, v)).episodes.size() > 1) {
                         playLabel =
                                 "▶   播放 · " + curSeason.seasonLabel + " · " + firstDisp.cleanTitle;
                     } else {
@@ -833,7 +817,13 @@ final class MobileDetailScreen {
                                 if (remembered != null) a.playBookmark(s, v, remembered);
                                 else
                                     a.resolvePlayer(
-                                            s, v, v.lines.get(0), v.lines.get(0).episodes.get(0));
+                                            s,
+                                            v,
+                                            v.lines.get(SourcePreferences.lineIndex(a, v)),
+                                            v.lines
+                                                    .get(SourcePreferences.lineIndex(a, v))
+                                                    .episodes
+                                                    .get(0));
                             });
                     playBtnWrap.addView(playBtn, new LinearLayout.LayoutParams(-1, a.dp(48)));
 
@@ -856,7 +846,7 @@ final class MobileDetailScreen {
                         playBtnWrap.addView(bmInfo, new LinearLayout.LayoutParams(-1, -2));
                     }
 
-                    int initLine = 0, initPage = 0;
+                    int initLine = SourcePreferences.lineIndex(a, v), initPage = 0;
                     if (remembered != null) {
                         for (int i = 0; i < v.lines.size(); i++) {
                             if (v.lines.get(i).name.equals(remembered.line)) {
@@ -941,7 +931,7 @@ final class MobileDetailScreen {
             pill.setTypeface(null, Typeface.BOLD);
             pill.setSingleLine(true);
             pill.setPadding(a.dp(12), a.dp(4), a.dp(12), a.dp(4));
-            pill.setBackground(glassBg(a, 0x38ffffff, 0x33ffffff, 999));
+            a.glass(pill, 999);
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, -2);
             if (i > 0) lp.leftMargin = a.dp(8);
             pillsRow.addView(pill, lp);
@@ -967,6 +957,9 @@ final class MobileDetailScreen {
         panel.removeAllViews();
 
         final Cms.Line line = video.lines.get(lineIndex);
+        panel.addView(
+                a.navButton(
+                        "默认播放线路", "line-preferred", () -> SourcePreferences.chooseLine(a, video)));
         final boolean descending = a.prefs.getBoolean(Prefs.EPISODES_DESCENDING, false);
         final SeasonMeta curSeason = parseSeasonMeta(video.title);
         final int total = line.episodes.size();
@@ -1003,7 +996,8 @@ final class MobileDetailScreen {
                                                 + site.name
                                                 + ")";
                             }
-                            new AlertDialog.Builder(a)
+                            new AppDialog.Builder(a)
+                                    .wrapChoices()
                                     .setTitle("切换播放源 (" + video.lines.size() + ")")
                                     .setSingleChoiceItems(
                                             names,

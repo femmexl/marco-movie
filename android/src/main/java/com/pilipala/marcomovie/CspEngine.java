@@ -317,7 +317,7 @@ public final class CspEngine implements SourceEngine {
     }
 
     public String home() throws Exception {
-        return call("home", () -> spider.homeContent(false));
+        return call("home", () -> spider.homeContent(true));
     }
 
     public String homeVideos() throws Exception {
@@ -325,9 +325,12 @@ public final class CspEngine implements SourceEngine {
     }
 
     public String category(String id, int page) throws Exception {
-        return call(
-                "category",
-                () -> spider.categoryContent(id, "" + page, false, new HashMap<String, String>()));
+        return category(id, page, Collections.emptyMap());
+    }
+
+    public String category(String id, int page, Map<String, String> filters) throws Exception {
+        HashMap<String, String> values = new HashMap<>(filters);
+        return call("category", () -> spider.categoryContent(id, "" + page, true, values));
     }
 
     public String detail(String id) throws Exception {
@@ -485,7 +488,7 @@ public final class CspEngine implements SourceEngine {
         String address = parts[0];
         if (address.startsWith("file://")) {
             File localFile = new File(URI.create(address));
-            String allowedPrefix = app.getFilesDir().getCanonicalPath();
+            String allowedPrefix = app.getFilesDir().getCanonicalPath() + File.separator;
             if (!localFile.exists() || !localFile.getCanonicalPath().startsWith(allowedPrefix)) {
                 throw new IOException("本地 spider 插件不存在或不在受保护目录内");
             }

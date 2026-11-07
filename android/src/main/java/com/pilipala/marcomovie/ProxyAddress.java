@@ -12,6 +12,10 @@ final class ProxyAddress {
         return "http://127.0.0.1:" + port;
     }
 
+    static String rewrite(String value) {
+        return rewrite(value, port, token);
+    }
+
     static String rewrite(String value, int port) {
         return rewrite(value, port, "");
     }

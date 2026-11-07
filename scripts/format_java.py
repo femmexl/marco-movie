@@ -19,7 +19,7 @@ VERSION = '1.24.0'
 SHA256 = '812f805f58112460edf01bf202a8e61d0fd1f35c0d4fabd54220640776ec57a1'
 URL = f'https://github.com/google/google-java-format/releases/download/v{VERSION}/google-java-format-{VERSION}-all-deps.jar'
 JAR = ROOT / 'tools/format' / f'google-java-format-{VERSION}-all-deps.jar'
-SCOPES = (('android/src/main/java/com/pilipala', '**/*.java'), ('android/tests', '*.java'), ('android/tests/device', '*.java'))
+SCOPES = (('shared/java', '**/*.java'), ('android/src/main/java/com/pilipala', '**/*.java'), ('android/tests', '*.java'), ('android/tests/device', '*.java'))
 OPTIONS = ['--aosp', '--skip-sorting-imports', '--skip-removing-unused-imports',
            '--skip-reflowing-long-strings', '--skip-javadoc-formatting']
 EXPORTS = [f'--add-exports=jdk.compiler/com.sun.tools.javac.{p}=ALL-UNNAMED'

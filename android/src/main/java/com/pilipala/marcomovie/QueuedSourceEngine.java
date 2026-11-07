@@ -25,6 +25,12 @@ final class QueuedSourceEngine implements SourceEngine {
         return gate.call(false, () -> delegate.category(id, page));
     }
 
+    public String category(String id, int page, java.util.Map<String, String> filters)
+            throws Exception {
+        java.util.Map<String, String> values = new java.util.LinkedHashMap<>(filters);
+        return gate.call(false, () -> delegate.category(id, page, values));
+    }
+
     public String search(String query, int page) throws Exception {
         return gate.call(false, () -> delegate.search(query, page));
     }
