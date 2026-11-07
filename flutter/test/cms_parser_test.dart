@@ -232,7 +232,8 @@ void main() {
     );
     expect(CspBridge.isMyDriveSite(myDriveSite), isTrue);
     expect(CspBridge.isNetdiskSite(myDriveSite), isTrue);
-    expect(CspBridge.backendsForSite(myDriveSite).first.name, isNot('魔都动漫'));
+    // vodPool 保持为空（不内置任何片源后端），内置云盘站点没有常规 http 后端。
+    expect(CspBridge.backendsForSite(myDriveSite), isEmpty);
 
     final (cats, listing) = await CspBridge.fetchHome(
       myDriveSite,
